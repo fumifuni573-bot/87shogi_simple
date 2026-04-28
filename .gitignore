@@ -1,0 +1,25 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
+*.swp
+.idea/
+
+# Swift / SwiftPM
+.build/
+.swiftpm/
+
+# Flutter / Dart
+flutter_app/.dart_tool/
+flutter_app/.flutter-plugins-dependencies
+flutter_app/.pub/
+flutter_app/.pub-cache/
+flutter_app/build/
+flutter_app/coverage/
+flutter_app/android/app/debug/
+flutter_app/android/app/profile/
+flutter_app/android/app/release/
+
+# Local metadata
+flutter_app/.metadata
+flutter_app/flutter_app.iml
