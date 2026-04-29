@@ -223,16 +223,26 @@ class HomePage extends ConsumerWidget {
   }
 
   Future<void> _showUrlRegistrationSheet(BuildContext context) async {
-    final added = await showModalBottomSheet<bool>(
+    final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (_) => URLRegistrationSheet(urlSourceStore: _urlSourceStore),
+      builder: (_) => URLRegistrationSheet(
+        urlSourceStore: _urlSourceStore,
+        userStore: _shogiWarsUserStore,
+        backendService: _backendService,
+      ),
     );
-    if (added == true && context.mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('URL を登録しました')),
-      );
+    if (!context.mounted || result == null) {
+      return;
+    }
+    final message = switch (result) {
+      'url-added' => 'URL を登録しました',
+      'sync-started' => 'ユーザー登録と同期を開始しました',
+      _ => null,
+    };
+    if (message != null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
     }
   }
 }

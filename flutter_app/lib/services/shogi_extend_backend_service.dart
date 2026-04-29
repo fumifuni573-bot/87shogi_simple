@@ -1,34 +1,20 @@
 import 'dart:convert';
-import 'dart:io';
 
-import 'package:path_provider/path_provider.dart';
+import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 class BackendSettingsStore {
-  BackendSettingsStore({Future<Directory> Function()? documentsDirectoryProvider})
-      : _documentsDirectoryProvider = documentsDirectoryProvider ?? getApplicationDocumentsDirectory;
-
   static const defaultBaseUrl = 'http://127.0.0.1:8000';
-  final Future<Directory> Function() _documentsDirectoryProvider;
-
-  Future<File> _storageFile() async {
-    final baseDir = await _documentsDirectoryProvider();
-    final file = File('${baseDir.path}${Platform.pathSeparator}shogi_extend_backend_settings_v1.json');
-    if (!file.existsSync()) {
-      await file.writeAsString(jsonEncode(const {'baseUrl': defaultBaseUrl}), flush: true);
-    }
-    return file;
-  }
+  static const _storageKey = 'shogi_extend_backend_base_url_v1';
 
   Future<String> loadBaseUrl() async {
-    final file = await _storageFile();
-    final raw = await file.readAsString();
-    final decoded = jsonDecode(raw) as Map<String, dynamic>;
-    return decoded['baseUrl'] as String? ?? defaultBaseUrl;
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_storageKey) ?? defaultBaseUrl;
   }
 
   Future<void> saveBaseUrl(String value) async {
-    final file = await _storageFile();
-    await file.writeAsString(jsonEncode({'baseUrl': value}), flush: true);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_storageKey, value);
   }
 
   String? normalizeBaseUrl(String rawValue) {
@@ -205,12 +191,12 @@ class BackendKifuItemSummaryResponse {
 class ShogiExtendBackendService {
   ShogiExtendBackendService({
     BackendSettingsStore? settingsStore,
-    HttpClient? client,
+    http.Client? client,
   })  : _settingsStore = settingsStore ?? BackendSettingsStore(),
-        _client = client ?? HttpClient();
+        _client = client ?? http.Client();
 
   final BackendSettingsStore _settingsStore;
-  final HttpClient _client;
+  final http.Client _client;
 
   Future<String> get baseUrl async => _settingsStore.loadBaseUrl();
 
@@ -305,14 +291,14 @@ class ShogiExtendBackendService {
   }
 
   Future<String> _sendRequest(Uri uri, {required String method, String? body}) async {
-    final request = await _client.openUrl(method, uri);
-    request.headers.set(HttpHeaders.acceptHeader, 'application/json');
+    final request = http.Request(method, uri);
+    request.headers['accept'] = 'application/json';
     if (body != null) {
-      request.headers.set(HttpHeaders.contentTypeHeader, 'application/json');
-      request.write(body);
+      request.headers['content-type'] = 'application/json';
+      request.body = body;
     }
-    final response = await request.close();
-    final data = await utf8.decodeStream(response);
+    final response = await _client.send(request);
+    final data = await response.stream.bytesToString();
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw ShogiExtendBackendException('バックエンド通信に失敗しました (HTTP ${response.statusCode})');
     }

@@ -7,6 +7,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../app/providers.dart';
 import '../../../domain/models/shogi_models.dart';
 import '../../../services/kifu_storage_service.dart';
+import '../../../services/shogi_extend_backend_service.dart';
+import '../../../services/shogi_wars_user_store.dart';
 import '../../../services/url_source_store.dart';
 import '../state/game_session_controller.dart';
 import '../../../logic/clock_logic.dart';
@@ -24,6 +26,8 @@ class _GamePageState extends ConsumerState<GamePage> {
   Timer? _startCueTimer;
   final KifuStorageService _kifuStorageService = KifuStorageService();
   final URLSourceStore _urlSourceStore = URLSourceStore();
+  final ShogiWarsUserStore _shogiWarsUserStore = ShogiWarsUserStore();
+  final ShogiExtendBackendService _backendService = ShogiExtendBackendService();
 
   @override
   void initState() {
@@ -341,6 +345,8 @@ class _GamePageState extends ConsumerState<GamePage> {
           child: SavedKifListSheet(
             storageService: _kifuStorageService,
             urlSourceStore: _urlSourceStore,
+            userStore: _shogiWarsUserStore,
+            backendService: _backendService,
             onOpen: (entry) async {
               final record = await _kifuStorageService.loadRecord(entry.file);
               controller.openPersistedRecordForReview(record);

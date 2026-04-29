@@ -1,7 +1,6 @@
 import 'dart:convert';
-import 'dart:io';
 
-import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../domain/models/shogi_models.dart';
 
@@ -16,23 +15,11 @@ enum URLSourceAddResult {
 }
 
 class URLSourceStore {
-  URLSourceStore({Future<Directory> Function()? documentsDirectoryProvider})
-      : _documentsDirectoryProvider = documentsDirectoryProvider ?? getApplicationDocumentsDirectory;
-
-  final Future<Directory> Function() _documentsDirectoryProvider;
-
-  Future<File> _storageFile() async {
-    final baseDir = await _documentsDirectoryProvider();
-    final file = File('${baseDir.path}${Platform.pathSeparator}registered_kifu_source_urls_v1.json');
-    if (!file.existsSync()) {
-      await file.writeAsString('[]', flush: true);
-    }
-    return file;
-  }
+  static const _storageKey = 'registered_kifu_source_urls_v1';
 
   Future<List<RegisteredKifuSource>> load() async {
-    final file = await _storageFile();
-    final raw = await file.readAsString();
+    final prefs = await SharedPreferences.getInstance();
+    final raw = prefs.getString(_storageKey) ?? '[]';
     final decoded = jsonDecode(raw) as List<dynamic>;
     return decoded
         .map((entry) => RegisteredKifuSource.fromJson(entry as Map<String, dynamic>))
@@ -92,10 +79,10 @@ class URLSourceStore {
   }
 
   Future<void> _save(List<RegisteredKifuSource> items) async {
-    final file = await _storageFile();
-    await file.writeAsString(
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(
+      _storageKey,
       jsonEncode(items.map((entry) => entry.toJson()).toList(growable: false)),
-      flush: true,
     );
   }
 }

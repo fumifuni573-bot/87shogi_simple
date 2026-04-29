@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import load_settings
 from app.models import KifuItemSummary, ScrapeJob, ScrapeJobCreate, TrackedSource, TrackedSourceCreate
@@ -37,6 +38,16 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="Shogi Extend Scraper", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://127.0.0.1:3000",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")

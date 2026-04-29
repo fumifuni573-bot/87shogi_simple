@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:file_selector/file_selector.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -51,7 +52,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   @override
   void initState() {
     super.initState();
-    _future = widget.storageService.listSavedFiles();
+    _future = kIsWeb ? Future.value(const <SavedKifFile>[]) : widget.storageService.listSavedFiles();
     _sourceFuture = widget.urlSourceStore.load();
     _userFuture = widget.userStore.load();
     unawaited(_refreshBackendStatuses());
@@ -66,7 +67,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
 
   void _reloadLocal() {
     setState(() {
-      _future = widget.storageService.listSavedFiles();
+      _future = kIsWeb ? Future.value(const <SavedKifFile>[]) : widget.storageService.listSavedFiles();
       _sourceFuture = widget.urlSourceStore.load();
       _userFuture = widget.userStore.load();
     });
@@ -106,6 +107,9 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   }
 
   Future<void> _delete(SavedKifFile entry) async {
+    if (kIsWeb) {
+      return;
+    }
     await widget.storageService.deleteSavedFile(entry.file);
     _reloadLocal();
   }
@@ -192,6 +196,15 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   }
 
   Future<void> _importFile() async {
+    if (kIsWeb) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Web ではローカル棋譜ライブラリは未対応です')),
+      );
+      return;
+    }
     const typeGroup = XTypeGroup(
       label: 'kifu',
       extensions: ['kif', 'csa', 'txt'],
@@ -227,6 +240,15 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   }
 
   Future<void> _importPastedText() async {
+    if (kIsWeb) {
+      if (!mounted) {
+        return;
+      }
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Web ではローカル棋譜ライブラリは未対応です')),
+      );
+      return;
+    }
     final text = _pasteController.text.trim();
     if (text.isEmpty) {
       return;
@@ -644,6 +666,22 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                                   const _SectionTitle(label: '保存棋譜'),
                                   const SizedBox(height: 10),
                                   ...items.map(_buildSavedFileTile),
+                                ],
+                                if (kIsWeb) ...[
+                                  if (items.isNotEmpty || sources.isNotEmpty || users.isNotEmpty)
+                                    const SizedBox(height: 18),
+                                  Container(
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: AppPalette.surface,
+                                      borderRadius: BorderRadius.circular(18),
+                                      border: Border.all(color: AppPalette.outline),
+                                    ),
+                                    child: Text(
+                                      'Web では保存済み棋譜ライブラリの表示は無効です。URL 登録と backend 同期のみ確認できます。',
+                                      style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                                    ),
+                                  ),
                                 ],
                                 if (items.isNotEmpty && (sources.isNotEmpty || users.isNotEmpty))
                                   const SizedBox(height: 18),
