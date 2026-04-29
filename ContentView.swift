@@ -49,6 +49,7 @@ struct ContentView: View {
     typealias PersistedGameRecord = PersistedShogiGameRecord
     typealias SavedKifFile = SavedKifFileModel
     typealias RegisteredKifuSource = RegisteredKifuSourceModel
+    typealias RegisteredShogiWarsUser = RegisteredShogiWarsUserModel
 
     private enum KifuViewerEntry {
         case savedFile(SavedKifFile)
@@ -67,6 +68,10 @@ struct ContentView: View {
     @State private var backgroundKifuActor: BackgroundKifuActor? = nil
     @State private var savedKifFiles: [SavedKifFile] = []
     @State private var registeredKifuSources: [RegisteredKifuSource] = []
+    @State private var registeredShogiWarsUsers: [RegisteredShogiWarsUser] = []
+    @State private var latestTrackedUserJobs: [String: ShogiExtendBackendService.ScrapeJobResponse] = [:]
+    @State private var latestTrackedUserItems: [String: [ShogiExtendBackendService.KifuItemSummaryResponse]] = [:]
+    @State private var trackedUserJobPollingTask: Task<Void, Never>? = nil
     @State private var savedKifReloadTask: Task<Void, Never>? = nil
     @State private var showSavedKifSheet = false
     @State private var showURLRegistrationSheet = false
@@ -90,6 +95,7 @@ struct ContentView: View {
     @State private var byoYomiAlertPulse = false
     @State private var exportKifShareItem: KifExportShareItem?
     @State private var lastExportedKifTempURL: URL?
+    @State private var shogiExtendBackendService = ShogiExtendBackendService()
     @State private var matchInitialSeconds: TimeInterval = 600
     @State private var matchByoYomiSeconds: Int = 0
     @State private var standaloneSenteInitialSeconds: TimeInterval = 600
@@ -530,6 +536,16 @@ struct ContentView: View {
         // 棋譜一覧シート
         .sheet(isPresented: $showSavedKifSheet) {
             savedKifListView
+        }
+        .onChange(of: showSavedKifSheet) {
+            if showSavedKifSheet {
+                Task {
+                    await refreshTrackedUserJobStatuses()
+                    startTrackedUserJobPollingIfNeeded()
+                }
+            } else {
+                stopTrackedUserJobPolling()
+            }
         }
         .kifExportShareSheet(item: $exportKifShareItem) {
             cleanupExportedKifTempFile()
@@ -1929,6 +1945,10 @@ struct ContentView: View {
         SavedKifListSheetView(
             savedKifFiles: savedKifFiles,
             registeredSources: registeredKifuSources,
+            registeredUsers: registeredShogiWarsUsers,
+            latestTrackedUserJobs: latestTrackedUserJobs,
+            latestTrackedUserItems: latestTrackedUserItems,
+            isTrackedUserJobPolling: trackedUserJobPollingTask != nil,
             showStartScreen: showStartScreen,
             shouldReloadOnAppear: !isRunningInPreviews,
             leadingToolbarPlacement: leadingToolbarPlacement,
@@ -1976,21 +1996,40 @@ struct ContentView: View {
             onRegisterURL: { input in
                 await MainActor.run { registerKifuSourceURL(input) }
             },
+            onRegisterUser: { input in
+                await registerShogiWarsUser(input)
+            },
             onReload: {
                 reloadSavedKifFiles()
                 reloadRegisteredKifuSources()
+                reloadRegisteredShogiWarsUsers()
+                Task {
+                    await refreshTrackedUserJobStatuses()
+                }
                 // 登録ソースの新着棋譜を非同期で取得
-                if let actor = backgroundKifuActor, !registeredKifuSources.isEmpty {
-                    Task {
+                Task {
+                    var summaryParts: [String] = []
+                    if let actor = backgroundKifuActor, !registeredKifuSources.isEmpty {
                         await syncService.syncAll(
                             sources:         registeredKifuSources,
                             backgroundActor: actor
                         )
                         reloadSavedKifFiles()
                         if let result = syncService.lastResult {
-                            statusMessage = "同期完了: \(result.summary)"
+                            summaryParts.append("URL同期: \(result.summary)")
                         }
                     }
+
+                    if !registeredShogiWarsUsers.isEmpty {
+                        let backendSummary = await triggerTrackedUserScrapeJobs(mode: .incremental)
+                        summaryParts.append(backendSummary)
+                        await refreshTrackedUserJobStatuses()
+                    }
+
+                    if !summaryParts.isEmpty {
+                        statusMessage = summaryParts.joined(separator: " / ")
+                    }
+                }
                 }
             },
             onRenameSave: {
@@ -2016,6 +2055,9 @@ struct ContentView: View {
                         }
                     }
                 }
+            },
+            onDeleteUser: { user in
+                deleteRegisteredShogiWarsUser(user)
             }
         )
     }
@@ -3030,6 +3072,10 @@ struct ContentView: View {
         if !isRunningInPreviews {
             reloadSavedKifFiles()
             reloadRegisteredKifuSources()
+            reloadRegisteredShogiWarsUsers()
+            Task {
+                await refreshTrackedUserJobStatuses()
+            }
         }
         showSavedKifSheet = true
     }
@@ -3166,6 +3212,98 @@ struct ContentView: View {
         registeredKifuSources = URLSourceStore.load().sorted { $0.createdAt > $1.createdAt }
     }
 
+    private func reloadRegisteredShogiWarsUsers() {
+        registeredShogiWarsUsers = ShogiWarsUserStore.load().sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func hasActiveTrackedUserJobs() -> Bool {
+        latestTrackedUserJobs.values.contains { job in
+            job.status == "queued" || job.status == "running"
+        }
+    }
+
+    private func startTrackedUserJobPollingIfNeeded() {
+        guard showSavedKifSheet, hasActiveTrackedUserJobs() else {
+            stopTrackedUserJobPolling()
+            return
+        }
+        guard trackedUserJobPollingTask == nil else { return }
+
+        trackedUserJobPollingTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                guard !Task.isCancelled else { break }
+                await refreshTrackedUserJobStatuses()
+                if !showSavedKifSheet || !hasActiveTrackedUserJobs() {
+                    break
+                }
+            }
+
+            await MainActor.run {
+                trackedUserJobPollingTask = nil
+            }
+        }
+    }
+
+    private func stopTrackedUserJobPolling() {
+        trackedUserJobPollingTask?.cancel()
+        trackedUserJobPollingTask = nil
+    }
+
+    @MainActor
+    private func refreshTrackedUserJobStatuses() async {
+        guard !registeredShogiWarsUsers.isEmpty else {
+            latestTrackedUserJobs = [:]
+            latestTrackedUserItems = [:]
+            stopTrackedUserJobPolling()
+            return
+        }
+
+        var next: [String: ShogiExtendBackendService.ScrapeJobResponse] = [:]
+        var nextItems: [String: [ShogiExtendBackendService.KifuItemSummaryResponse]] = [:]
+        await withTaskGroup(
+            of: (String, ShogiExtendBackendService.ScrapeJobResponse?, [ShogiExtendBackendService.KifuItemSummaryResponse]).self
+        ) { group in
+            for user in registeredShogiWarsUsers {
+                group.addTask {
+                    do {
+                        let jobs = try await shogiExtendBackendService.listScrapeJobs(username: user.username, limit: 1)
+                        guard let latestJob = jobs.first else {
+                            return (user.username, nil, [])
+                        }
+                        let items: [ShogiExtendBackendService.KifuItemSummaryResponse]
+                        if latestJob.status == "succeeded" || latestJob.status == "running" {
+                            items = try await shogiExtendBackendService.listKifuItems(
+                                username: user.username,
+                                jobID: latestJob.id,
+                                limit: 5
+                            )
+                        } else {
+                            items = []
+                        }
+                        return (user.username, latestJob, items)
+                    } catch {
+                        return (user.username, nil, [])
+                    }
+                }
+            }
+
+            for await (username, job, items) in group {
+                if let job {
+                    next[username] = job
+                }
+                if !items.isEmpty {
+                    nextItems[username] = items
+                }
+            }
+        }
+        latestTrackedUserJobs = next
+        latestTrackedUserItems = nextItems
+        if showSavedKifSheet {
+            startTrackedUserJobPollingIfNeeded()
+        }
+    }
+
     @discardableResult
     private func registerKifuSourceURL(_ input: String) -> URLSourceStore.AddResult {
         let result = URLSourceStore.add(rawURL: input)
@@ -3219,6 +3357,89 @@ struct ContentView: View {
         }
     }
 
+    @discardableResult
+    private func registerShogiWarsUser(_ input: String) async -> ShogiWarsUserStore.AddResult {
+        if let validation = ShogiWarsUserStore.validationResult(for: input) {
+            switch validation {
+            case .empty:
+                statusMessage = "ユーザー名を入力してください"
+            case .invalidUsername:
+                statusMessage = "ユーザー名は英数字、アンダースコア、ハイフンのみ対応です"
+            case .duplicate:
+                statusMessage = "このユーザーはすでに登録済みです"
+            case .backendUnavailable, .added:
+                break
+            }
+            return validation
+        }
+
+        do {
+            _ = try await shogiExtendBackendService.registerTrackedUser(username: input.trimmingCharacters(in: .whitespacesAndNewlines))
+        } catch {
+            statusMessage = error.localizedDescription
+            return .backendUnavailable
+        }
+
+        let result = ShogiWarsUserStore.add(username: input)
+        if result.isSuccess {
+            reloadRegisteredShogiWarsUsers()
+            if let user = registeredShogiWarsUsers.first {
+                statusMessage = "将棋ウォーズユーザーを登録しました（\(user.username)）"
+            } else {
+                statusMessage = "将棋ウォーズユーザーを登録しました"
+            }
+        } else {
+            switch result {
+            case .empty:
+                statusMessage = "ユーザー名を入力してください"
+            case .invalidUsername:
+                statusMessage = "ユーザー名は英数字、アンダースコア、ハイフンのみ対応です"
+            case .duplicate:
+                statusMessage = "このユーザーはすでに登録済みです"
+            case .backendUnavailable:
+                statusMessage = "backend に接続できませんでした"
+            case .added:
+                statusMessage = "将棋ウォーズユーザーを登録しました"
+            }
+        }
+        return result
+    }
+
+    @MainActor
+    private func triggerTrackedUserScrapeJobs(mode: ShogiExtendBackendService.ScrapeMode) async -> String {
+        guard !registeredShogiWarsUsers.isEmpty else { return "" }
+
+        var queuedCount = 0
+        var failedUsers: [String] = []
+
+        await withTaskGroup(of: (String, Bool).self) { group in
+            for user in registeredShogiWarsUsers {
+                group.addTask {
+                    do {
+                        _ = try await shogiExtendBackendService.registerTrackedUser(username: user.username)
+                        _ = try await shogiExtendBackendService.enqueueScrapeJob(username: user.username, mode: mode)
+                        return (user.username, true)
+                    } catch {
+                        return (user.username, false)
+                    }
+                }
+            }
+
+            for await (username, succeeded) in group {
+                if succeeded {
+                    queuedCount += 1
+                } else {
+                    failedUsers.append(username)
+                }
+            }
+        }
+
+        if failedUsers.isEmpty {
+            return "ユーザー同期: \(queuedCount)件ジョブ開始"
+        }
+        return "ユーザー同期: \(queuedCount)件開始 / \(failedUsers.count)件失敗"
+    }
+
     @MainActor
     private func importFromSharedSource(_ source: RegisteredKifuSource) async {
         if backgroundKifuActor == nil {
@@ -3251,6 +3472,26 @@ struct ContentView: View {
         URLSourceStore.remove(id: source.id)
         reloadRegisteredKifuSources()
         statusMessage = "登録URLを削除しました"
+    }
+
+    private func deleteRegisteredShogiWarsUser(_ user: RegisteredShogiWarsUser) {
+        Task {
+            do {
+                try await shogiExtendBackendService.deleteTrackedUser(username: user.username)
+            } catch {
+                // ローカル削除は優先し、backend 側の残存だけ通知する。
+                statusMessage = "backend 側の削除に失敗しましたが、ローカル登録は削除します"
+            }
+            await MainActor.run {
+                ShogiWarsUserStore.remove(id: user.id)
+                reloadRegisteredShogiWarsUsers()
+                latestTrackedUserJobs.removeValue(forKey: user.username)
+                latestTrackedUserItems.removeValue(forKey: user.username)
+                if statusMessage.isEmpty || statusMessage == "登録ユーザーを削除しました" {
+                    statusMessage = "登録ユーザーを削除しました"
+                }
+            }
+        }
     }
 
     private func openKifuInViewer(_ entry: KifuViewerEntry) {

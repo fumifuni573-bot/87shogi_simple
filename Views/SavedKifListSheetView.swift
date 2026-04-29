@@ -33,6 +33,10 @@ struct SavedKifListSheetView: View {
 
     let savedKifFiles: [ContentView.SavedKifFile]
     let registeredSources: [ContentView.RegisteredKifuSource]
+    let registeredUsers: [RegisteredShogiWarsUserModel]
+    let latestTrackedUserJobs: [String: ShogiExtendBackendService.ScrapeJobResponse]
+    let latestTrackedUserItems: [String: [ShogiExtendBackendService.KifuItemSummaryResponse]]
+    let isTrackedUserJobPolling: Bool
     let showStartScreen: Bool
     let shouldReloadOnAppear: Bool
     let leadingToolbarPlacement: ToolbarItemPlacement
@@ -56,6 +60,7 @@ struct SavedKifListSheetView: View {
     let onImportPastedText: (String) async -> String?
     let onMoveToFolder: (ContentView.SavedKifFile, String) -> Void
     let onRegisterURL: (String) async -> URLSourceStore.AddResult
+    let onRegisterUser: (String) async -> ShogiWarsUserStore.AddResult
     let onReload: () -> Void
     let onRenameSave: () -> Void
     let onRenameCancel: () -> Void
@@ -66,8 +71,11 @@ struct SavedKifListSheetView: View {
     var isNetworkUnavailable: Bool = false
     var hasFailedSources: Bool = false
     let onRetryFailed: () -> Void
+    let onDeleteUser: (RegisteredShogiWarsUserModel) -> Void
 
     @State private var showURLRegistrationSheet = false
+    @State private var showUserRegistrationSheet = false
+    @State private var showBackendSettingsSheet = false
     @State private var showFileImporter = false
     @State private var showPasteKifSheet = false
     @State private var pastedKifText = ""
@@ -403,7 +411,7 @@ struct SavedKifListSheetView: View {
     var body: some View {
         NavigationStack {
             List {
-                if savedKifFiles.isEmpty && registeredSources.isEmpty {
+                if savedKifFiles.isEmpty && registeredSources.isEmpty && registeredUsers.isEmpty {
                     ContentUnavailableView(
                         "棋譜データはまだありません",
                         systemImage: "doc.text",
@@ -430,6 +438,31 @@ struct SavedKifListSheetView: View {
                                 for index in offsets {
                                     guard filteredSources.indices.contains(index) else { continue }
                                     onDeleteSource(filteredSources[index])
+                                }
+                            }
+                        }
+                    }
+
+                    if !registeredUsers.isEmpty {
+                        Section("登録ユーザー") {
+                            if isTrackedUserJobPolling {
+                                HStack(spacing: 8) {
+                                    ProgressView()
+                                        .progressViewStyle(.circular)
+                                        .scaleEffect(0.8)
+                                    Text("backend のジョブ状態を更新中")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+
+                            ForEach(registeredUsers) { user in
+                                trackedUserRow(user)
+                            }
+                            .onDelete { offsets in
+                                for index in offsets {
+                                    guard registeredUsers.indices.contains(index) else { continue }
+                                    onDeleteUser(registeredUsers[index])
                                 }
                             }
                         }
@@ -482,6 +515,19 @@ struct SavedKifListSheetView: View {
                     } label: {
                         Image(systemName: "link.badge.plus")
                     }
+
+                    Button {
+                        showUserRegistrationSheet = true
+                    } label: {
+                        Image(systemName: "person.badge.plus")
+                    }
+
+                    Button {
+                        showBackendSettingsSheet = true
+                    } label: {
+                        Image(systemName: "server.rack")
+                    }
+                    .accessibilityLabel("backend 接続設定")
 
                     Button {
                         moveFolderTarget = nil
@@ -553,6 +599,12 @@ struct SavedKifListSheetView: View {
             }
             .sheet(isPresented: $showURLRegistrationSheet) {
                 URLRegistrationSheetView(onRegister: onRegisterURL)
+            }
+            .sheet(isPresented: $showUserRegistrationSheet) {
+                ShogiWarsUserRegistrationSheetView(onRegister: onRegisterUser)
+            }
+            .sheet(isPresented: $showBackendSettingsSheet) {
+                ShogiExtendBackendSettingsSheetView()
             }
             .sheet(isPresented: $showMoveFolderSheet) {
                 moveFolderSheetView
@@ -845,6 +897,105 @@ struct SavedKifListSheetView: View {
             } label: {
                 Label("削除", systemImage: "trash")
             }
+        }
+    }
+
+    @ViewBuilder
+    private func trackedUserRow(_ user: RegisteredShogiWarsUserModel) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Text("ウォーズユーザー")
+                    .font(.caption.bold())
+                    .foregroundStyle(accentTint)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(accentTint.opacity(0.12))
+                    .clipShape(Capsule())
+                Text(user.createdAt.formatted(date: .abbreviated, time: .shortened))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text(user.username)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.primary)
+
+            Text(user.searchURLString)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+
+            if let latestJob = latestTrackedUserJobs[user.username] {
+                Divider()
+                    .padding(.vertical, 2)
+
+                HStack(spacing: 8) {
+                    Text(latestJob.statusLabel)
+                        .font(.caption.bold())
+                        .foregroundStyle(jobStatusColor(for: latestJob.status))
+                    if let requestedAt = latestJob.requestedAt {
+                        Text(requestedAt.formatted(date: .abbreviated, time: .shortened))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text(latestJob.summaryLine)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                if let importedItems = latestTrackedUserItems[user.username], !importedItems.isEmpty {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("取り込み結果")
+                            .font(.caption.bold())
+                            .foregroundStyle(.secondary)
+
+                        ForEach(importedItems.prefix(5), id: \.id) { item in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(item.matchupLabel)
+                                    .font(.caption)
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+                                Text(item.summaryLine)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                Text(item.sourceGameURL)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                            }
+                            .padding(.top, 2)
+                        }
+                    }
+                    .padding(.top, 4)
+                }
+            } else {
+                Text("まだ backend ジョブ履歴はありません")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+            Button(role: .destructive) {
+                onDeleteUser(user)
+            } label: {
+                Label("削除", systemImage: "trash")
+            }
+        }
+    }
+
+    private func jobStatusColor(for status: String) -> Color {
+        switch status {
+        case "queued":
+            return .orange
+        case "running":
+            return accentTint
+        case "succeeded":
+            return .green
+        case "failed":
+            return .red
+        default:
+            return .secondary
         }
     }
 

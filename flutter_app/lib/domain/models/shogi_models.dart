@@ -172,6 +172,39 @@ class RegisteredKifuSource {
   }
 }
 
+class RegisteredShogiWarsUser {
+  const RegisteredShogiWarsUser({
+    required this.id,
+    required this.username,
+    required this.createdAt,
+  });
+
+  final String id;
+  final String username;
+  final DateTime createdAt;
+
+  String get normalizedUsername => username.trim().toLowerCase();
+
+  String get searchUrlString {
+    final encoded = Uri.encodeQueryComponent(username);
+    return 'https://www.shogi-extend.com/swars/search?query=$encoded&page=1';
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'username': username,
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory RegisteredShogiWarsUser.fromJson(Map<String, dynamic> json) {
+    return RegisteredShogiWarsUser(
+      id: json['id'] as String,
+      username: json['username'] as String,
+      createdAt: DateTime.parse(json['createdAt'] as String),
+    );
+  }
+}
+
 class ShogiPiece {
   const ShogiPiece({
     required this.owner,

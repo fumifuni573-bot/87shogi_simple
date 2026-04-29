@@ -256,3 +256,24 @@ struct RegisteredKifuSourceModel: Identifiable, Codable, Hashable {
         KifuSourceProvider.detect(from: urlString)
     }
 }
+
+struct RegisteredShogiWarsUserModel: Identifiable, Codable, Hashable {
+    let id: UUID
+    let username: String
+    let createdAt: Date
+
+    init(id: UUID = UUID(), username: String, createdAt: Date = Date()) {
+        self.id = id
+        self.username = username
+        self.createdAt = createdAt
+    }
+
+    var normalizedUsername: String {
+        username.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    var searchURLString: String {
+        let encoded = username.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? username
+        return "https://www.shogi-extend.com/swars/search?query=\(encoded)&page=1"
+    }
+}

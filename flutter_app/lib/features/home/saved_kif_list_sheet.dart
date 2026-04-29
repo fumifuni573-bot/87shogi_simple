@@ -1,11 +1,17 @@
+import 'dart:async';
+
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../domain/models/shogi_models.dart';
 import '../../services/kifu_storage_service.dart';
+import '../../services/shogi_extend_backend_service.dart';
+import '../../services/shogi_wars_user_store.dart';
 import '../../services/url_source_store.dart';
 import '../../shared/theme/app_palette.dart';
+import 'shogi_extend_backend_settings_sheet.dart';
+import 'shogi_wars_user_registration_sheet.dart';
 import 'url_registration_sheet.dart';
 
 class SavedKifListSheet extends StatefulWidget {
@@ -13,11 +19,15 @@ class SavedKifListSheet extends StatefulWidget {
     super.key,
     required this.storageService,
     required this.urlSourceStore,
+    required this.userStore,
+    required this.backendService,
     required this.onOpen,
   });
 
   final KifuStorageService storageService;
   final URLSourceStore urlSourceStore;
+  final ShogiWarsUserStore userStore;
+  final ShogiExtendBackendService backendService;
   final ValueChanged<SavedKifFile> onOpen;
 
   @override
@@ -27,38 +37,97 @@ class SavedKifListSheet extends StatefulWidget {
 class _SavedKifListSheetState extends State<SavedKifListSheet> {
   late Future<List<SavedKifFile>> _future;
   late Future<List<RegisteredKifuSource>> _sourceFuture;
+  late Future<List<RegisteredShogiWarsUser>> _userFuture;
   bool _isImporting = false;
-  final TextEditingController _pasteController = TextEditingController();
   bool _isImportingPastedText = false;
-
-  @override
-  void dispose() {
-    _pasteController.dispose();
-    super.dispose();
-  }
+  bool _isReloadingBackend = false;
+  bool _isJobPolling = false;
+  final TextEditingController _pasteController = TextEditingController();
+  Timer? _pollingTimer;
+  Map<String, BackendScrapeJobResponse> _latestJobs = <String, BackendScrapeJobResponse>{};
+  Map<String, List<BackendKifuItemSummaryResponse>> _latestItems =
+      <String, List<BackendKifuItemSummaryResponse>>{};
 
   @override
   void initState() {
     super.initState();
     _future = widget.storageService.listSavedFiles();
     _sourceFuture = widget.urlSourceStore.load();
+    _userFuture = widget.userStore.load();
+    unawaited(_refreshBackendStatuses());
   }
 
-  void _reload() {
+  @override
+  void dispose() {
+    _pollingTimer?.cancel();
+    _pasteController.dispose();
+    super.dispose();
+  }
+
+  void _reloadLocal() {
     setState(() {
       _future = widget.storageService.listSavedFiles();
       _sourceFuture = widget.urlSourceStore.load();
+      _userFuture = widget.userStore.load();
     });
+  }
+
+  Future<void> _reloadAll() async {
+    _reloadLocal();
+    setState(() {
+      _isReloadingBackend = true;
+    });
+
+    final users = await widget.userStore.load();
+    int startedCount = 0;
+    int failedCount = 0;
+    for (final user in users) {
+      try {
+        await widget.backendService.registerTrackedUser(user.username);
+        await widget.backendService.enqueueScrapeJob(user.username);
+        startedCount += 1;
+      } catch (_) {
+        failedCount += 1;
+      }
+    }
+
+    await _refreshBackendStatuses();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _isReloadingBackend = false;
+    });
+    if (startedCount > 0 || failedCount > 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('ユーザー同期: $startedCount件開始 / $failedCount件失敗')),
+      );
+    }
   }
 
   Future<void> _delete(SavedKifFile entry) async {
     await widget.storageService.deleteSavedFile(entry.file);
-    _reload();
+    _reloadLocal();
   }
 
   Future<void> _deleteSource(RegisteredKifuSource entry) async {
     await widget.urlSourceStore.remove(entry.id);
-    _reload();
+    _reloadLocal();
+  }
+
+  Future<void> _deleteUser(RegisteredShogiWarsUser entry) async {
+    try {
+      await widget.backendService.deleteTrackedUser(entry.username);
+    } catch (_) {
+      // Keep the local store as the source of truth if backend delete fails.
+    }
+    await widget.userStore.remove(entry.id);
+    _latestJobs.remove(entry.username);
+    _latestItems.remove(entry.username);
+    _reloadLocal();
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _showRegistrationSheet() async {
@@ -69,9 +138,55 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
       builder: (context) => URLRegistrationSheet(urlSourceStore: widget.urlSourceStore),
     );
     if (added == true && mounted) {
-      _reload();
+      _reloadLocal();
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('URL を登録しました')),
+      );
+    }
+  }
+
+  Future<ShogiWarsUserAddResult> _registerTrackedUser(String username) async {
+    final validation = await widget.userStore.validationResult(username);
+    if (validation != null) {
+      return validation;
+    }
+    try {
+      await widget.backendService.registerTrackedUser(username.trim());
+    } catch (_) {
+      return ShogiWarsUserAddResult.backendUnavailable;
+    }
+    final result = await widget.userStore.add(username);
+    if (result.isSuccess) {
+      _reloadLocal();
+      await _refreshBackendStatuses();
+    }
+    return result;
+  }
+
+  Future<void> _showUserRegistrationSheet() async {
+    final added = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ShogiWarsUserRegistrationSheet(onRegister: _registerTrackedUser),
+    );
+    if (added == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('将棋ウォーズユーザーを登録しました')),
+      );
+    }
+  }
+
+  Future<void> _showBackendSettingsSheet() async {
+    final saved = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => ShogiExtendBackendSettingsSheet(backendService: widget.backendService),
+    );
+    if (saved == true && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('backend 設定を保存しました')),
       );
     }
   }
@@ -94,7 +209,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     try {
       final text = await selected.readAsString();
       await widget.storageService.importText(text);
-      _reload();
+      _reloadLocal();
       messenger.showSnackBar(
         SnackBar(content: Text('${selected.name} を取り込みました')),
       );
@@ -126,7 +241,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     try {
       await widget.storageService.importText(text);
       _pasteController.clear();
-      _reload();
+      _reloadLocal();
       if (mounted) {
         navigator.pop();
       }
@@ -319,6 +434,71 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     );
   }
 
+  Future<void> _refreshBackendStatuses() async {
+    final users = await widget.userStore.load();
+    if (users.isEmpty) {
+      if (!mounted) {
+        return;
+      }
+      setState(() {
+        _latestJobs = <String, BackendScrapeJobResponse>{};
+        _latestItems = <String, List<BackendKifuItemSummaryResponse>>{};
+        _isJobPolling = false;
+      });
+      _stopPolling();
+      return;
+    }
+
+    final nextJobs = <String, BackendScrapeJobResponse>{};
+    final nextItems = <String, List<BackendKifuItemSummaryResponse>>{};
+    for (final user in users) {
+      try {
+        final jobs = await widget.backendService.listScrapeJobs(user.username, limit: 1);
+        if (jobs.isEmpty) {
+          continue;
+        }
+        final latestJob = jobs.first;
+        nextJobs[user.username] = latestJob;
+        if (latestJob.status == 'succeeded' || latestJob.status == 'running') {
+          final items = await widget.backendService.listKifuItems(user.username, latestJob.id, limit: 5);
+          if (items.isNotEmpty) {
+            nextItems[user.username] = items;
+          }
+        }
+      } catch (_) {
+        continue;
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _latestJobs = nextJobs;
+      _latestItems = nextItems;
+      _isJobPolling = nextJobs.values.any((job) => job.isActive);
+    });
+    if (_isJobPolling) {
+      _startPolling();
+    } else {
+      _stopPolling();
+    }
+  }
+
+  void _startPolling() {
+    if (_pollingTimer != null && _pollingTimer!.isActive) {
+      return;
+    }
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      unawaited(_refreshBackendStatuses());
+    });
+  }
+
+  void _stopPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -357,7 +537,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                           ),
                           const SizedBox(height: 4),
                           Text(
-                            '保存済み KIF と登録済み URL ソースをまとめて管理できます。',
+                            '保存済み KIF、登録 URL、登録ユーザー、backend 結果をまとめて管理できます。',
                             style: theme.textTheme.bodySmall?.copyWith(
                               color: AppPalette.textSecondary,
                             ),
@@ -368,6 +548,14 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                     IconButton(
                       onPressed: _showRegistrationSheet,
                       icon: const Icon(Icons.add_link_rounded),
+                    ),
+                    IconButton(
+                      onPressed: _showUserRegistrationSheet,
+                      icon: const Icon(Icons.person_add_alt_rounded),
+                    ),
+                    IconButton(
+                      onPressed: _showBackendSettingsSheet,
+                      icon: const Icon(Icons.dns_rounded),
                     ),
                     IconButton(
                       onPressed: _isImporting ? null : _importFile,
@@ -384,8 +572,14 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                       icon: const Icon(Icons.content_paste_go_rounded),
                     ),
                     IconButton(
-                      onPressed: _reload,
-                      icon: const Icon(Icons.refresh_rounded),
+                      onPressed: _isReloadingBackend ? null : _reloadAll,
+                      icon: _isReloadingBackend
+                          ? const SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(strokeWidth: 2.2),
+                            )
+                          : const Icon(Icons.refresh_rounded),
                     ),
                     IconButton(
                       onPressed: () => Navigator.of(context).pop(),
@@ -424,37 +618,67 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                       future: _sourceFuture,
                       builder: (context, sourceSnapshot) {
                         final sources = sourceSnapshot.data ?? const <RegisteredKifuSource>[];
-                        if (items.isEmpty && sources.isEmpty) {
-                          return const Padding(
-                            padding: EdgeInsets.fromLTRB(24, 20, 24, 32),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: [
-                                Icon(Icons.menu_book_outlined, size: 40, color: Color(0xFF8C6D5A)),
-                                
-                                SizedBox(height: 12),
-                                Text('保存棋譜と登録 URL はまだありません'),
-                              ],
-                            ),
-                          );
-                        }
+                        return FutureBuilder<List<RegisteredShogiWarsUser>>(
+                          future: _userFuture,
+                          builder: (context, userSnapshot) {
+                            final users = userSnapshot.data ?? const <RegisteredShogiWarsUser>[];
+                            if (items.isEmpty && sources.isEmpty && users.isEmpty) {
+                              return const Padding(
+                                padding: EdgeInsets.fromLTRB(24, 20, 24, 32),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.menu_book_outlined, size: 40, color: Color(0xFF8C6D5A)),
+                                    SizedBox(height: 12),
+                                    Text('保存棋譜、登録 URL、登録ユーザーはまだありません'),
+                                  ],
+                                ),
+                              );
+                            }
 
-                        return ListView(
-                          shrinkWrap: true,
-                          padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
-                          children: [
-                            if (items.isNotEmpty) ...[
-                              _SectionTitle(label: '保存棋譜'),
-                              const SizedBox(height: 10),
-                              ...items.map(_buildSavedFileTile),
-                            ],
-                            if (items.isNotEmpty && sources.isNotEmpty) const SizedBox(height: 18),
-                            if (sources.isNotEmpty) ...[
-                              _SectionTitle(label: '登録 URL'),
-                              const SizedBox(height: 10),
-                              ...sources.map(_buildSourceTile),
-                            ],
-                          ],
+                            return ListView(
+                              shrinkWrap: true,
+                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+                              children: [
+                                if (items.isNotEmpty) ...[
+                                  const _SectionTitle(label: '保存棋譜'),
+                                  const SizedBox(height: 10),
+                                  ...items.map(_buildSavedFileTile),
+                                ],
+                                if (items.isNotEmpty && (sources.isNotEmpty || users.isNotEmpty))
+                                  const SizedBox(height: 18),
+                                if (sources.isNotEmpty) ...[
+                                  const _SectionTitle(label: '登録 URL'),
+                                  const SizedBox(height: 10),
+                                  ...sources.map(_buildSourceTile),
+                                ],
+                                if (users.isNotEmpty) ...[
+                                  if (sources.isNotEmpty) const SizedBox(height: 18),
+                                  Row(
+                                    children: [
+                                      const Expanded(child: _SectionTitle(label: '登録ユーザー')),
+                                      if (_isJobPolling) ...[
+                                        const SizedBox(
+                                          width: 16,
+                                          height: 16,
+                                          child: CircularProgressIndicator(strokeWidth: 2),
+                                        ),
+                                        const SizedBox(width: 8),
+                                        Text(
+                                          '更新中',
+                                          style: theme.textTheme.bodySmall?.copyWith(
+                                            color: AppPalette.textSecondary,
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  ...users.map(_buildTrackedUserTile),
+                                ],
+                              ],
+                            );
+                          },
                         );
                       },
                     );
@@ -471,6 +695,21 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   String _formatDate(DateTime value) {
     String two(int number) => number.toString().padLeft(2, '0');
     return '${value.year}/${two(value.month)}/${two(value.day)} ${two(value.hour)}:${two(value.minute)}';
+  }
+
+  Color _jobStatusColor(String status) {
+    switch (status) {
+      case 'queued':
+        return Colors.orange;
+      case 'running':
+        return AppPalette.info;
+      case 'succeeded':
+        return Colors.green;
+      case 'failed':
+        return Colors.red;
+      default:
+        return AppPalette.textSecondary;
+    }
   }
 
   Widget _buildSavedFileTile(SavedKifFile entry) {
@@ -525,6 +764,138 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
           trailing: IconButton(
             onPressed: () => _deleteSource(entry),
             icon: const Icon(Icons.delete_outline_rounded),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTrackedUserTile(RegisteredShogiWarsUser entry) {
+    final theme = Theme.of(context);
+    final latestJob = _latestJobs[entry.username];
+    final importedItems = _latestItems[entry.username] ?? const <BackendKifuItemSummaryResponse>[];
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Container(
+        decoration: BoxDecoration(
+          color: AppPalette.surface,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: AppPalette.outline),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 12, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: AppPalette.info.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(999),
+                    ),
+                    child: const Text(
+                      'ウォーズユーザー',
+                      style: TextStyle(fontSize: 11, fontWeight: FontWeight.w700, color: AppPalette.info),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      _formatDate(entry.createdAt),
+                      style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                    ),
+                  ),
+                  IconButton(
+                    onPressed: () => _deleteUser(entry),
+                    icon: const Icon(Icons.delete_outline_rounded),
+                  ),
+                ],
+              ),
+              Text(
+                entry.username,
+                style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                entry.searchUrlString,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+              ),
+              if (latestJob != null) ...[
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Text(
+                      latestJob.statusLabel,
+                      style: theme.textTheme.bodySmall?.copyWith(
+                        color: _jobStatusColor(latestJob.status),
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (latestJob.requestedAt != null)
+                      Expanded(
+                        child: Text(
+                          _formatDate(latestJob.requestedAt!.toLocal()),
+                          style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                        ),
+                      ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  latestJob.summaryLine,
+                  style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                ),
+                if (importedItems.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    '取り込み結果',
+                    style: theme.textTheme.bodySmall?.copyWith(
+                      color: AppPalette.textSecondary,
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 6),
+                  ...importedItems.take(5).map(
+                    (item) => Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            item.matchupLabel,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w600),
+                          ),
+                          Text(
+                            item.summaryLine,
+                            style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                          ),
+                          Text(
+                            item.sourceGameUrl,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ] else ...[
+                const SizedBox(height: 10),
+                Text(
+                  'まだ backend ジョブ履歴はありません',
+                  style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                ),
+              ],
+            ],
           ),
         ),
       ),

@@ -5,6 +5,8 @@ import '../../app/providers.dart';
 import '../../domain/models/shogi_models.dart';
 import '../../services/kifu_storage_service.dart';
 import '../../services/kifu_parser.dart';
+import '../../services/shogi_extend_backend_service.dart';
+import '../../services/shogi_wars_user_store.dart';
 import '../../services/url_source_store.dart';
 import '../../shared/theme/app_palette.dart';
 import '../game/presentation/game_page.dart';
@@ -17,6 +19,8 @@ class HomePage extends ConsumerWidget {
 
   static final KifuStorageService _kifuStorageService = KifuStorageService();
   static final URLSourceStore _urlSourceStore = URLSourceStore();
+  static final ShogiWarsUserStore _shogiWarsUserStore = ShogiWarsUserStore();
+  static final ShogiExtendBackendService _backendService = ShogiExtendBackendService();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -188,6 +192,8 @@ class HomePage extends ConsumerWidget {
           child: SavedKifListSheet(
             storageService: _kifuStorageService,
             urlSourceStore: _urlSourceStore,
+            userStore: _shogiWarsUserStore,
+            backendService: _backendService,
             onOpen: (entry) async {
               final messenger = ScaffoldMessenger.of(context);
               try {

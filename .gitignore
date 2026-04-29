@@ -23,3 +23,13 @@ flutter_app/android/app/release/
 # Local metadata
 flutter_app/.metadata
 flutter_app/flutter_app.iml
+
+# Python backend
+backend/.venv/
+backend/__pycache__/
+backend/.pytest_cache/
+backend/.mypy_cache/
+backend/.ruff_cache/
+backend/.coverage
+backend/htmlcov/
+*.pyc
