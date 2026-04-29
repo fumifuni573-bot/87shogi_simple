@@ -1,6 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../domain/models/shogi_models.dart';
+import '../../../logic/clock_logic.dart';
 
 class ClockState {
   const ClockState({
@@ -105,6 +106,14 @@ class ClockController extends Notifier<ClockState> {
     );
   }
 
+  void resetToInitialValues() {
+    resetClocks(
+      sente: state.senteInitialSeconds,
+      gote: state.goteInitialSeconds,
+      byoYomi: state.byoYomiSeconds,
+    );
+  }
+
   void setTimerRunning(bool isRunning) {
     state = state.copyWith(
       isTimerRunning: isRunning,
@@ -147,5 +156,139 @@ class ClockController extends Notifier<ClockState> {
 
   void setByoYomiSeconds(int seconds) {
     state = state.copyWith(byoYomiSeconds: seconds);
+  }
+
+  double displaySecondsFor(ShogiPlayer player) {
+    final main = player == ShogiPlayer.sente ? state.senteClockRemaining : state.goteClockRemaining;
+    final byo = player == ShogiPlayer.sente ? state.senteByoYomiRemaining : state.goteByoYomiRemaining;
+    return ClockLogic.displaySeconds(
+      main: main,
+      byoYomiRemaining: byo,
+      byoYomiSeconds: state.byoYomiSeconds,
+    );
+  }
+
+  void pauseTimer() {
+    if (!state.isTimerRunning) {
+      return;
+    }
+    state = state.copyWith(
+      isTimerRunning: false,
+      timerLastUpdate: DateTime.now(),
+    );
+  }
+
+  void handleStandaloneTap(ShogiPlayer player) {
+    if (state.timerExpiredPlayer != null) {
+      return;
+    }
+
+    if (!state.isTimerRunning) {
+      final nextPlayer = player.opposite;
+      _prepareByoYomiForTurnStart(nextPlayer);
+      state = state.copyWith(
+        timerActivePlayer: nextPlayer,
+        isTimerRunning: true,
+        timerLastUpdate: DateTime.now(),
+      );
+      return;
+    }
+
+    if (state.timerActivePlayer != player) {
+      return;
+    }
+
+    final nextPlayer = player.opposite;
+    _prepareByoYomiForTurnStart(nextPlayer);
+    state = state.copyWith(
+      timerActivePlayer: nextPlayer,
+      timerLastUpdate: DateTime.now(),
+    );
+  }
+
+  void tick(DateTime now) {
+    if (!state.isTimerRunning || state.timerActivePlayer == null) {
+      state = state.copyWith(timerLastUpdate: now);
+      return;
+    }
+
+    final elapsed = now.difference(state.timerLastUpdate).inMilliseconds / 1000;
+    state = state.copyWith(timerLastUpdate: now);
+    if (elapsed <= 0) {
+      return;
+    }
+
+    if (state.timerActivePlayer == ShogiPlayer.sente) {
+      _tickActivePlayer(ShogiPlayer.sente, elapsed);
+      return;
+    }
+    _tickActivePlayer(ShogiPlayer.gote, elapsed);
+  }
+
+  void _tickActivePlayer(ShogiPlayer player, double elapsed) {
+    final main = player == ShogiPlayer.sente ? state.senteClockRemaining : state.goteClockRemaining;
+    var remainder = elapsed;
+    var nextMain = main;
+
+    if (nextMain > 0) {
+      final consumeMain = nextMain < remainder ? nextMain : remainder;
+      nextMain -= consumeMain;
+      remainder -= consumeMain;
+    }
+
+    double nextByo = player == ShogiPlayer.sente ? state.senteByoYomiRemaining : state.goteByoYomiRemaining;
+    if (remainder > 0 || nextMain <= 0) {
+      final result = ClockLogic.consumeByoYomi(
+        currentRemaining: nextByo,
+        byoYomiSeconds: state.byoYomiSeconds,
+        elapsed: remainder,
+      );
+      nextByo = result.remaining;
+      if (!result.alive) {
+        _expire(player);
+        return;
+      }
+    }
+
+    if (player == ShogiPlayer.sente) {
+      state = state.copyWith(
+        senteClockRemaining: nextMain,
+        senteByoYomiRemaining: nextByo,
+      );
+    } else {
+      state = state.copyWith(
+        goteClockRemaining: nextMain,
+        goteByoYomiRemaining: nextByo,
+      );
+    }
+  }
+
+  void _prepareByoYomiForTurnStart(ShogiPlayer player) {
+    final main = player == ShogiPlayer.sente ? state.senteClockRemaining : state.goteClockRemaining;
+    final prepared = ClockLogic.preparedByoYomiRemaining(
+      main: main,
+      byoYomiSeconds: state.byoYomiSeconds,
+    );
+    if (prepared == null) {
+      return;
+    }
+
+    if (player == ShogiPlayer.sente) {
+      state = state.copyWith(senteByoYomiRemaining: prepared);
+    } else {
+      state = state.copyWith(goteByoYomiRemaining: prepared);
+    }
+  }
+
+  void _expire(ShogiPlayer loser) {
+    state = state.copyWith(
+      timerExpiredPlayer: loser,
+      timerActivePlayer: null,
+      isTimerRunning: false,
+      senteClockRemaining: loser == ShogiPlayer.sente ? 0 : state.senteClockRemaining,
+      goteClockRemaining: loser == ShogiPlayer.gote ? 0 : state.goteClockRemaining,
+      senteByoYomiRemaining: loser == ShogiPlayer.sente ? 0 : state.senteByoYomiRemaining,
+      goteByoYomiRemaining: loser == ShogiPlayer.gote ? 0 : state.goteByoYomiRemaining,
+    );
   }
 }

@@ -6,7 +6,7 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import load_settings
-from app.models import KifuItemSummary, ScrapeJob, ScrapeJobCreate, TrackedSource, TrackedSourceCreate
+from app.models import KifuItemDetail, KifuItemSummary, ScrapeJob, ScrapeJobCreate, TrackedSource, TrackedSourceCreate
 from app.repositories.base import ScrapeRepository
 from app.repositories.cosmos import CosmosScrapeRepository
 from app.repositories.in_memory import InMemoryScrapeRepository
@@ -110,3 +110,12 @@ async def list_kifu_items(username: str, job_id: str | None = None, limit: int =
     service: ScrapeService = app.state.service
     safe_limit = max(1, min(limit, 100))
     return service.list_kifu_items(username=username, job_id=job_id, limit=safe_limit)
+
+
+@app.get("/kifu-items/{item_id}", response_model=KifuItemDetail)
+async def get_kifu_item(item_id: str, username: str) -> KifuItemDetail:
+    service: ScrapeService = app.state.service
+    item = service.get_kifu_item(username=username, item_id=item_id)
+    if item is None:
+        raise HTTPException(status_code=404, detail="kifu item not found")
+    return item

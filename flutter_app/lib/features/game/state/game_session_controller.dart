@@ -605,6 +605,26 @@ class GameSessionController extends Notifier<GameSessionState> {
     state = state.copyWith(selectedHandicap: handicap);
   }
 
+  void resignCurrentPlayer() {
+    if (_isGameOver(state) || state.isReviewMode) {
+      return;
+    }
+
+    final resigningPlayer = state.turn;
+    final winner = resigningPlayer.opposite;
+    state = state.copyWith(
+      winner: winner,
+      winReason: '投了',
+      isInterrupted: false,
+      isSennichite: false,
+      showGameEndPopup: true,
+      clearSelected: true,
+      clearSelectedDropType: true,
+      clearPendingPromotionMove: true,
+      statusMessage: '${resigningPlayer.label}が投了。${winner.label}の勝ちです',
+    );
+  }
+
   void setPositionCounts(Map<String, int> counts) {
     state = state.copyWith(positionCounts: counts);
   }
@@ -657,7 +677,7 @@ class GameSessionController extends Notifier<GameSessionState> {
     if (index >= state.moveHistory.length - 1) {
       return '検討モード: 終局局面';
     }
-    return '検討モード: ${index}手目';
+    return '検討モード: $index手目';
   }
 
   String _handicapLabel(GameHandicap handicap) {

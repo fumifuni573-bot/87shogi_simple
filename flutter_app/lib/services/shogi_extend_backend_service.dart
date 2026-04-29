@@ -188,6 +188,45 @@ class BackendKifuItemSummaryResponse {
   }
 }
 
+class BackendKifuItemDetailResponse extends BackendKifuItemSummaryResponse {
+  const BackendKifuItemDetailResponse({
+    required super.id,
+    required super.username,
+    required super.sourceGameId,
+    required super.sourceGameUrl,
+    required super.searchedPage,
+    required super.scrapedAt,
+    required super.players,
+    required this.kifText,
+    required this.metadata,
+    super.jobId,
+    super.matchDateTime,
+    super.result,
+  });
+
+  final String kifText;
+  final Map<String, dynamic> metadata;
+
+  factory BackendKifuItemDetailResponse.fromJson(Map<String, dynamic> json) {
+    final playersRaw = json['players'] as Map<String, dynamic>? ?? const {};
+    final metadataRaw = json['metadata'] as Map<String, dynamic>? ?? const {};
+    return BackendKifuItemDetailResponse(
+      id: json['id'] as String,
+      username: json['username'] as String,
+      jobId: json['job_id'] as String?,
+      sourceGameId: json['source_game_id'] as String? ?? '',
+      sourceGameUrl: json['source_game_url'] as String? ?? '',
+      searchedPage: json['searched_page'] as int? ?? 0,
+      scrapedAt: DateTime.tryParse(json['scraped_at'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
+      matchDateTime: DateTime.tryParse(json['match_datetime'] as String? ?? ''),
+      players: playersRaw.map((key, value) => MapEntry(key, value as String?)),
+      result: json['result'] as String?,
+      kifText: json['kif_text'] as String? ?? '',
+      metadata: Map<String, dynamic>.from(metadataRaw),
+    );
+  }
+}
+
 class ShogiExtendBackendService {
   ShogiExtendBackendService({
     BackendSettingsStore? settingsStore,
@@ -236,17 +275,29 @@ class ShogiExtendBackendService {
         .toList(growable: false);
   }
 
-  Future<List<BackendKifuItemSummaryResponse>> listKifuItems(String username, String jobId, {int limit = 10}) async {
-    final uri = await _buildUri('/kifu-items', queryParameters: {
+  Future<List<BackendKifuItemSummaryResponse>> listKifuItems(String username, String? jobId, {int limit = 10}) async {
+    final queryParameters = <String, String>{
       'username': username,
-      'job_id': jobId,
       'limit': '$limit',
-    });
+    };
+    if (jobId != null && jobId.isNotEmpty) {
+      queryParameters['job_id'] = jobId;
+    }
+    final uri = await _buildUri('/kifu-items', queryParameters: queryParameters);
     final data = await _sendRequest(uri, method: 'GET');
     final decoded = jsonDecode(data) as List<dynamic>;
     return decoded
         .map((entry) => BackendKifuItemSummaryResponse.fromJson(entry as Map<String, dynamic>))
         .toList(growable: false);
+  }
+
+  Future<BackendKifuItemDetailResponse> getKifuItemDetail(String username, String itemId) async {
+    final encodedItemId = Uri.encodeComponent(itemId);
+    final uri = await _buildUri('/kifu-items/$encodedItemId', queryParameters: {
+      'username': username,
+    });
+    final data = await _sendRequest(uri, method: 'GET');
+    return BackendKifuItemDetailResponse.fromJson(jsonDecode(data) as Map<String, dynamic>);
   }
 
   Future<void> deleteTrackedUser(String username) async {

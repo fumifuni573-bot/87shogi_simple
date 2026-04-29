@@ -101,6 +101,43 @@ class BackendApiTests(unittest.TestCase):
         self.assertEqual(items[0]["source_game_id"], "chubby_cat-mikyun-20260320_082239")
         self.assertEqual(items[0]["players"]["sente"], self.username)
 
+    def test_get_kifu_item_detail_for_chubby_cat(self) -> None:
+        repository = app.state.repository
+        item = KifuItem.from_scrape(
+            SearchResult(
+                username=self.username,
+                page=8,
+                detail_url="https://www.shogi-extend.com/swars/battles/chubby_cat-mikyun-20260320_082239",
+                source_game_id="chubby_cat-mikyun-20260320_082239",
+                match_date_label="2026/03/20 08:22:39",
+            ),
+            """開始日時：2026/03/20 08:22:39
+先手：chubby_cat
+後手：mikyun
+結末：先手勝ち
+手数----指手---------消費時間--
+1 ７六歩(77)   ( 0:01/00:00:01)
+""",
+            metadata={"source": "test", "battle_key": "chubby_cat-mikyun-20260320_082239"},
+            job_id="job-chubby-cat-1",
+        )
+        repository.upsert_kifu_item(item)
+
+        response = self.client.get(f"/kifu-items/{item.id}", params={"username": self.username})
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["id"], item.id)
+        self.assertEqual(payload["username"], self.username)
+        self.assertEqual(payload["kif_text"], item.kif_text)
+        self.assertEqual(payload["metadata"]["battle_key"], "chubby_cat-mikyun-20260320_082239")
+
+    def test_get_kifu_item_detail_returns_404_when_missing(self) -> None:
+        response = self.client.get("/kifu-items/missing-item", params={"username": self.username})
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "kifu item not found")
+
 
 if __name__ == "__main__":
     unittest.main()

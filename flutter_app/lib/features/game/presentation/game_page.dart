@@ -6,7 +6,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../app/providers.dart';
 import '../../../domain/models/shogi_models.dart';
+import '../../../logic/match_start_logic.dart';
 import '../../../services/kifu_storage_service.dart';
+import '../../../services/kifu_parser.dart';
+import '../../../services/scraped_kifu_catalog.dart';
 import '../../../services/shogi_extend_backend_service.dart';
 import '../../../services/shogi_wars_user_store.dart';
 import '../../../services/url_source_store.dart';
@@ -24,23 +27,50 @@ class GamePage extends ConsumerStatefulWidget {
 
 class _GamePageState extends ConsumerState<GamePage> {
   Timer? _startCueTimer;
+  Timer? _furigomaSpinTimer;
   final KifuStorageService _kifuStorageService = KifuStorageService();
   final URLSourceStore _urlSourceStore = URLSourceStore();
   final ShogiWarsUserStore _shogiWarsUserStore = ShogiWarsUserStore();
   final ShogiExtendBackendService _backendService = ShogiExtendBackendService();
+  final ScrapedKifuCatalog _scrapedCatalog = createDefaultScrapedKifuCatalog();
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _scheduleMatchStartCueDismissal();
+      _startOpeningSequenceIfNeeded();
     });
   }
 
   @override
   void dispose() {
     _startCueTimer?.cancel();
+    _furigomaSpinTimer?.cancel();
     super.dispose();
+  }
+
+  void _startOpeningSequenceIfNeeded() {
+    final session = ref.read(gameSessionProvider);
+    if (session.isReviewMode || session.moveRecords.isNotEmpty || session.showGameEndPopup) {
+      return;
+    }
+    if (session.showFurigomaCue || session.showMatchStartCue) {
+      if (session.showMatchStartCue) {
+        _scheduleMatchStartCueDismissal();
+      }
+      return;
+    }
+
+    if (MatchStartLogic.shouldUseFurigoma(session.selectedHandicap)) {
+      _startFurigomaThenMatch();
+      return;
+    }
+
+    final controller = ref.read(gameSessionProvider.notifier);
+    controller.setTurn(MatchStartLogic.defaultOpeningTurn(session.selectedHandicap));
+    controller.setStatusMessage('先手の初手を待っています');
+    controller.setFlags(showStartScreen: false, showMatchStartCue: true, showFurigomaCue: false);
+    _scheduleMatchStartCueDismissal();
   }
 
   void _scheduleMatchStartCueDismissal() {
@@ -50,11 +80,74 @@ class _GamePageState extends ConsumerState<GamePage> {
     }
 
     _startCueTimer?.cancel();
-    _startCueTimer = Timer(const Duration(milliseconds: 1400), () {
+    _startCueTimer = Timer(MatchStartLogic.matchStartCueDuration, () {
       if (!mounted) {
         return;
       }
       ref.read(gameSessionProvider.notifier).dismissMatchStartCue();
+    });
+  }
+
+  void _startFurigomaThenMatch() {
+    final controller = ref.read(gameSessionProvider.notifier);
+    final results = MatchStartLogic.randomFurigomaResults();
+    controller.setFurigomaState(
+      results: results,
+      revealCount: 0,
+      rouletteTick: 0,
+      resultMessage: '',
+    );
+    controller.setFlags(showStartScreen: false, showFurigomaCue: true, showMatchStartCue: false);
+    controller.setStatusMessage('振り駒で先後を決めています');
+
+    _furigomaSpinTimer?.cancel();
+    _furigomaSpinTimer = Timer.periodic(MatchStartLogic.furigomaSpinInterval, (_) {
+      if (!mounted) {
+        return;
+      }
+      final session = ref.read(gameSessionProvider);
+      if (!session.showFurigomaCue || session.furigomaRevealCount >= session.furigomaResults.length) {
+        _furigomaSpinTimer?.cancel();
+        return;
+      }
+      controller.setFurigomaState(rouletteTick: session.furigomaRouletteTick + 1);
+    });
+
+    for (var index = 0; index < results.length; index++) {
+      Future<void>.delayed(MatchStartLogic.revealDelayAt(index), () {
+        if (!mounted) {
+          return;
+        }
+        final session = ref.read(gameSessionProvider);
+        if (!session.showFurigomaCue) {
+          return;
+        }
+        controller.setFurigomaState(revealCount: index + 1);
+      });
+    }
+
+    Future<void>.delayed(MatchStartLogic.revealFinishedDelay(results.length), () {
+      if (!mounted) {
+        return;
+      }
+      final session = ref.read(gameSessionProvider);
+      if (!session.showFurigomaCue) {
+        return;
+      }
+      final openingTurn = MatchStartLogic.openingTurnFrom(results);
+      final summary = MatchStartLogic.furigomaSummary(results);
+      controller.setTurn(openingTurn);
+      controller.setFurigomaState(resultMessage: openingTurn == ShogiPlayer.sente ? '下側が先手' : '上側が先手');
+      controller.setStatusMessage('$summary で${openingTurn.label}先手で対局開始');
+      _furigomaSpinTimer?.cancel();
+
+      Future<void>.delayed(MatchStartLogic.furigomaResultHold, () {
+        if (!mounted) {
+          return;
+        }
+        controller.setFlags(showFurigomaCue: false, showMatchStartCue: true, showStartScreen: false);
+        _scheduleMatchStartCueDismissal();
+      });
     });
   }
 
@@ -113,6 +206,8 @@ class _GamePageState extends ConsumerState<GamePage> {
                                   byoYomiRemaining: clock.goteByoYomiRemaining,
                                   isActive: clock.timerActivePlayer == ShogiPlayer.gote,
                                   isTopPlayer: true,
+                                  canResign: session.winner == null && !session.isInterrupted && !session.isSennichite,
+                                  onResign: _confirmResign,
                                 ),
                               ),
                             ),
@@ -164,6 +259,8 @@ class _GamePageState extends ConsumerState<GamePage> {
                                 byoYomiRemaining: clock.senteByoYomiRemaining,
                                 isActive: clock.timerActivePlayer == ShogiPlayer.sente,
                                 isTopPlayer: false,
+                                canResign: session.winner == null && !session.isInterrupted && !session.isSennichite,
+                                onResign: _confirmResign,
                               ),
                           ],
                         ),
@@ -183,6 +280,13 @@ class _GamePageState extends ConsumerState<GamePage> {
               },
             ),
           ),
+          if (session.showFurigomaCue)
+            _FurigomaOverlay(
+              results: session.furigomaResults,
+              revealCount: session.furigomaRevealCount,
+              rouletteTick: session.furigomaRouletteTick,
+              resultMessage: session.furigomaResultMessage,
+            ),
           if (session.showMatchStartCue)
             _MatchStartOverlay(
               topRole: _matchStartTopRole(session),
@@ -197,8 +301,8 @@ class _GamePageState extends ConsumerState<GamePage> {
               onExportKif: () => _exportKif(controller),
               onRematch: () {
                 controller.resetSession(handicap: session.selectedHandicap);
-                controller.setFlags(showStartScreen: false, showMatchStartCue: true);
-                _scheduleMatchStartCueDismissal();
+                controller.setFlags(showStartScreen: false, showMatchStartCue: false, showFurigomaCue: false);
+                _startOpeningSequenceIfNeeded();
               },
               onHome: () {
                 controller.returnToStartScreen();
@@ -335,11 +439,13 @@ class _GamePageState extends ConsumerState<GamePage> {
 
   Future<void> _showSavedKifSheet() async {
     final controller = ref.read(gameSessionProvider.notifier);
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) {
+      builder: (_) {
         return FractionallySizedBox(
           heightFactor: 0.84,
           child: SavedKifListSheet(
@@ -347,17 +453,76 @@ class _GamePageState extends ConsumerState<GamePage> {
             urlSourceStore: _urlSourceStore,
             userStore: _shogiWarsUserStore,
             backendService: _backendService,
+            scrapedCatalog: _scrapedCatalog,
             onOpen: (entry) async {
-              final record = await _kifuStorageService.loadRecord(entry.file);
-              controller.openPersistedRecordForReview(record);
-              if (context.mounted) {
-                Navigator.of(context).pop();
+              try {
+                final record = await _kifuStorageService.loadRecord(entry.file);
+                controller.openPersistedRecordForReview(record);
+                if (!mounted) {
+                  return;
+                }
+                navigator.pop();
+              } on KifuParseException catch (error) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('棋譜の読込に失敗しました: ${error.message}')),
+                );
+              } catch (error) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('棋譜の読込に失敗しました: $error')),
+                );
+              }
+            },
+            onOpenScraped: (item) async {
+              try {
+                final record = _kifuStorageService.parseRecordText(item.kifText);
+                controller.openPersistedRecordForReview(record);
+                if (!mounted) {
+                  return;
+                }
+                navigator.pop();
+              } on KifuParseException catch (error) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('棋譜の再現に失敗しました: ${error.message}')),
+                );
+              } catch (error) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('棋譜の再現に失敗しました: $error')),
+                );
               }
             },
           ),
         );
       },
     );
+  }
+
+  Future<void> _confirmResign() async {
+    final shouldResign = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('投了しますか？'),
+        content: const Text('この対局を投了します。よろしいですか？'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('キャンセル'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('投了する'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldResign != true || !mounted) {
+      return;
+    }
+
+    ref.read(clockControllerProvider.notifier)
+      ..setTimerRunning(false)
+      ..setActivePlayer(null);
+    ref.read(gameSessionProvider.notifier).resignCurrentPlayer();
   }
 }
 
@@ -514,6 +679,8 @@ class _PlayerControlStrip extends StatelessWidget {
     required this.byoYomiRemaining,
     required this.isActive,
     required this.isTopPlayer,
+    required this.canResign,
+    required this.onResign,
   });
 
   final String label;
@@ -521,6 +688,8 @@ class _PlayerControlStrip extends StatelessWidget {
   final double byoYomiRemaining;
   final bool isActive;
   final bool isTopPlayer;
+  final bool canResign;
+  final VoidCallback onResign;
 
   @override
   Widget build(BuildContext context) {
@@ -586,6 +755,23 @@ class _PlayerControlStrip extends StatelessWidget {
               color: AppPalette.textMuted,
               fontSize: 11,
               fontWeight: FontWeight.w700,
+            ),
+          ),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            onPressed: canResign ? onResign : null,
+            icon: const Icon(Icons.flag_rounded, size: 16),
+            label: const Text('投了'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: isActive ? AppPalette.info : AppPalette.textSecondary,
+              side: BorderSide(
+                color: isActive ? AppPalette.info.withValues(alpha: 0.7) : AppPalette.outline,
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              textStyle: const TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],
@@ -1569,6 +1755,109 @@ class _ReviewControlPanel extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _FurigomaOverlay extends StatelessWidget {
+  const _FurigomaOverlay({
+    required this.results,
+    required this.revealCount,
+    required this.rouletteTick,
+    required this.resultMessage,
+  });
+
+  final List<bool> results;
+  final int revealCount;
+  final int rouletteTick;
+  final String resultMessage;
+
+  @override
+  Widget build(BuildContext context) {
+    final allRevealed = revealCount >= results.length;
+    return IgnorePointer(
+      child: Container(
+        color: AppPalette.overlay,
+        alignment: Alignment.center,
+        child: Container(
+          margin: const EdgeInsets.symmetric(horizontal: 24),
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 26),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.32),
+            borderRadius: BorderRadius.circular(18),
+            border: Border.all(color: Colors.white.withValues(alpha: 0.35)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Text(
+                '振り駒',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 34,
+                  fontWeight: FontWeight.w900,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '後手候補（上側）の歩を振ります',
+                style: TextStyle(
+                  color: Colors.white.withValues(alpha: 0.92),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: List<Widget>.generate(results.length, (index) {
+                  final isRevealed = index < revealCount;
+                  final symbol = isRevealed ? (results[index] ? 'と' : '歩') : ((rouletteTick + index * 3).isEven ? 'と' : '歩');
+                  final bounce = isRevealed ? 0.0 : math.sin(rouletteTick * 0.55 + index) * 3.0;
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
+                    child: Transform.translate(
+                      offset: Offset(0, bounce),
+                      child: Container(
+                        width: 44,
+                        height: 56,
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white.withValues(alpha: 0.35)),
+                        ),
+                        child: Transform.rotate(
+                          angle: isRevealed ? 0 : ((rouletteTick % 8) * 45) * math.pi / 180,
+                          child: Text(
+                            symbol,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 28,
+                              fontWeight: FontWeight.w900,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+              if (allRevealed && resultMessage.isNotEmpty) ...[
+                const SizedBox(height: 18),
+                Text(
+                  resultMessage,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
       ),
     );
   }

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from azure.cosmos import CosmosClient, PartitionKey
+from azure.cosmos.exceptions import CosmosResourceNotFoundError
 
 from app.config import Settings
 from app.models import KifuItem, ScrapeJob, TrackedSource
@@ -128,6 +129,13 @@ class CosmosScrapeRepository(ScrapeRepository):
             )
         )
         return [KifuItem.model_validate(item) for item in items]
+
+    def get_kifu_item(self, username: str, item_id: str) -> KifuItem | None:
+        try:
+            item = self._items.read_item(item=item_id, partition_key=username)
+        except CosmosResourceNotFoundError:
+            return None
+        return KifuItem.model_validate(item)
 
     def has_kifu_item(self, username: str, source_game_id: str, content_hash: str | None = None) -> bool:
         query = "SELECT TOP 1 c.id FROM c WHERE c.username = @username AND c.source_game_id = @source_game_id"

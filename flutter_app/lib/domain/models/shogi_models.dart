@@ -205,6 +205,98 @@ class RegisteredShogiWarsUser {
   }
 }
 
+class ScrapedKifuRecord {
+  const ScrapedKifuRecord({
+    required this.id,
+    required this.username,
+    required this.sourceGameId,
+    required this.sourceGameUrl,
+    required this.searchedPage,
+    required this.scrapedAt,
+    required this.players,
+    required this.kifText,
+    this.jobId,
+    this.matchDateTime,
+    this.result,
+    this.metadata = const <String, dynamic>{},
+    this.storedAt,
+  });
+
+  final String id;
+  final String username;
+  final String? jobId;
+  final String sourceGameId;
+  final String sourceGameUrl;
+  final int searchedPage;
+  final DateTime scrapedAt;
+  final DateTime? matchDateTime;
+  final Map<String, String?> players;
+  final String? result;
+  final String kifText;
+  final Map<String, dynamic> metadata;
+  final DateTime? storedAt;
+
+  String get matchupLabel => '${players['sente'] ?? '先手不明'} vs ${players['gote'] ?? '後手不明'}';
+
+  String get summaryLine => '${result ?? '結果不明'} / p.$searchedPage';
+
+  ScrapedKifuRecord copyWith({
+    DateTime? storedAt,
+  }) {
+    return ScrapedKifuRecord(
+      id: id,
+      username: username,
+      jobId: jobId,
+      sourceGameId: sourceGameId,
+      sourceGameUrl: sourceGameUrl,
+      searchedPage: searchedPage,
+      scrapedAt: scrapedAt,
+      matchDateTime: matchDateTime,
+      players: players,
+      result: result,
+      kifText: kifText,
+      metadata: metadata,
+      storedAt: storedAt ?? this.storedAt,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'username': username,
+        'jobId': jobId,
+        'sourceGameId': sourceGameId,
+        'sourceGameUrl': sourceGameUrl,
+        'searchedPage': searchedPage,
+        'scrapedAt': scrapedAt.toIso8601String(),
+        'matchDateTime': matchDateTime?.toIso8601String(),
+        'players': players,
+        'result': result,
+        'kifText': kifText,
+        'metadata': metadata,
+        'storedAt': storedAt?.toIso8601String(),
+      };
+
+  factory ScrapedKifuRecord.fromJson(Map<String, dynamic> json) {
+    final playersRaw = json['players'] as Map<String, dynamic>? ?? const <String, dynamic>{};
+    final metadataRaw = json['metadata'] as Map<String, dynamic>? ?? const <String, dynamic>{};
+    return ScrapedKifuRecord(
+      id: json['id'] as String,
+      username: json['username'] as String,
+      jobId: json['jobId'] as String?,
+      sourceGameId: json['sourceGameId'] as String? ?? '',
+      sourceGameUrl: json['sourceGameUrl'] as String? ?? '',
+      searchedPage: json['searchedPage'] as int? ?? 0,
+      scrapedAt: DateTime.tryParse(json['scrapedAt'] as String? ?? '') ?? DateTime.fromMillisecondsSinceEpoch(0),
+      matchDateTime: DateTime.tryParse(json['matchDateTime'] as String? ?? ''),
+      players: playersRaw.map((key, value) => MapEntry(key, value as String?)),
+      result: json['result'] as String?,
+      kifText: json['kifText'] as String? ?? '',
+      metadata: Map<String, dynamic>.from(metadataRaw),
+      storedAt: DateTime.tryParse(json['storedAt'] as String? ?? ''),
+    );
+  }
+}
+
 class ShogiPiece {
   const ShogiPiece({
     required this.owner,

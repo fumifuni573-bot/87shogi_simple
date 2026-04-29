@@ -145,6 +145,19 @@ class KifuItemSummary(BaseModel):
         )
 
 
+class KifuItemDetail(KifuItemSummary):
+    kif_text: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @classmethod
+    def from_item(cls, item: KifuItem) -> "KifuItemDetail":
+        return cls(
+            **KifuItemSummary.from_item(item).model_dump(),
+            kif_text=item.kif_text,
+            metadata=item.metadata,
+        )
+
+
 def _extract_header_value(text: str, label: str) -> str | None:
     match = re.search(rf"^{re.escape(label)}：(.+)$", text, re.MULTILINE)
     if not match:

@@ -46,6 +46,41 @@ void main() {
     expect(loadedRecord.snapshot.winReason, '投了');
     expect(loadedRecord.snapshot.moveRecords, contains('先手 7七 歩 → 7六'));
   });
+
+  test('renameSavedFile updates file title without changing contents', () async {
+    final tempDir = await Directory.systemTemp.createTemp('kifu-storage-rename-test');
+    addTearDown(() => tempDir.delete(recursive: true));
+
+    final service = KifuStorageService(
+      documentsDirectoryProvider: () async => tempDir,
+      temporaryDirectoryProvider: () async => tempDir,
+    );
+    final source = await service.importText(KifuCodec.encode(_sampleRecord()));
+
+    final renamed = await service.renameSavedFile(source, '検討用メモ');
+    final entries = await service.listSavedFiles();
+    final contents = await renamed.readAsString();
+
+    expect(renamed.path.endsWith('検討用メモ.kif'), isTrue);
+    expect(entries.single.title, '検討用メモ');
+    expect(contents, contains('1 ７六歩(77)'));
+  });
+
+  test('deleteSavedFile removes the saved entry from the library', () async {
+    final tempDir = await Directory.systemTemp.createTemp('kifu-storage-delete-test');
+    addTearDown(() => tempDir.delete(recursive: true));
+
+    final service = KifuStorageService(
+      documentsDirectoryProvider: () async => tempDir,
+      temporaryDirectoryProvider: () async => tempDir,
+    );
+    final source = await service.importText(KifuCodec.encode(_sampleRecord()));
+
+    await service.deleteSavedFile(source);
+
+    expect(await source.exists(), isFalse);
+    expect(await service.listSavedFiles(), isEmpty);
+  });
 }
 
 PersistedShogiGameRecord _sampleRecord() {

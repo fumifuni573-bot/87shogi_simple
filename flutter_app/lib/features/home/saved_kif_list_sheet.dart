@@ -7,29 +7,40 @@ import 'package:flutter/services.dart';
 
 import '../../domain/models/shogi_models.dart';
 import '../../services/kifu_storage_service.dart';
+import '../../services/scraped_kifu_catalog.dart';
 import '../../services/shogi_extend_backend_service.dart';
 import '../../services/shogi_wars_user_store.dart';
+import '../../services/scraped_kifu_view_settings_store.dart';
 import '../../services/url_source_store.dart';
 import '../../shared/theme/app_palette.dart';
 import 'shogi_extend_backend_settings_sheet.dart';
 import 'shogi_wars_user_registration_sheet.dart';
 import 'url_registration_sheet.dart';
 
+typedef SavedKifOpenCallback = FutureOr<void> Function(SavedKifFile entry);
+typedef ScrapedKifOpenCallback = FutureOr<void> Function(ScrapedKifuRecord item);
+
 class SavedKifListSheet extends StatefulWidget {
-  const SavedKifListSheet({
+  SavedKifListSheet({
     super.key,
     required this.storageService,
     required this.urlSourceStore,
     required this.userStore,
     required this.backendService,
+    required this.scrapedCatalog,
+    ScrapedKifuViewSettingsStore? viewSettingsStore,
     required this.onOpen,
-  });
+    required this.onOpenScraped,
+  }) : viewSettingsStore = viewSettingsStore ?? ScrapedKifuViewSettingsStore();
 
   final KifuStorageService storageService;
   final URLSourceStore urlSourceStore;
   final ShogiWarsUserStore userStore;
   final ShogiExtendBackendService backendService;
-  final ValueChanged<SavedKifFile> onOpen;
+  final ScrapedKifuCatalog scrapedCatalog;
+  final ScrapedKifuViewSettingsStore viewSettingsStore;
+  final SavedKifOpenCallback onOpen;
+  final ScrapedKifOpenCallback onOpenScraped;
 
   @override
   State<SavedKifListSheet> createState() => _SavedKifListSheetState();
@@ -46,8 +57,8 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   final TextEditingController _pasteController = TextEditingController();
   Timer? _pollingTimer;
   Map<String, BackendScrapeJobResponse> _latestJobs = <String, BackendScrapeJobResponse>{};
-  Map<String, List<BackendKifuItemSummaryResponse>> _latestItems =
-      <String, List<BackendKifuItemSummaryResponse>>{};
+  Map<String, List<ScrapedKifuRecord>> _latestItems = <String, List<ScrapedKifuRecord>>{};
+  int _scrapedItemLimitPerUser = ScrapedKifuViewSettingsStore.defaultLimitPerUser;
 
   @override
   void initState() {
@@ -55,7 +66,9 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     _future = kIsWeb ? Future.value(const <SavedKifFile>[]) : widget.storageService.listSavedFiles();
     _sourceFuture = widget.urlSourceStore.load();
     _userFuture = widget.userStore.load();
+    unawaited(_loadScrapedItemLimit());
     unawaited(_refreshBackendStatuses());
+    unawaited(_refreshLocalScrapedItems());
   }
 
   @override
@@ -71,6 +84,32 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
       _sourceFuture = widget.urlSourceStore.load();
       _userFuture = widget.userStore.load();
     });
+    unawaited(_refreshLocalScrapedItems());
+  }
+
+  Future<void> _loadScrapedItemLimit() async {
+    final limit = await widget.viewSettingsStore.loadLimitPerUser();
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scrapedItemLimitPerUser = limit;
+    });
+    await _refreshLocalScrapedItems();
+  }
+
+  Future<void> _setScrapedItemLimit(int limit) async {
+    if (_scrapedItemLimitPerUser == limit) {
+      return;
+    }
+    await widget.viewSettingsStore.saveLimitPerUser(limit);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _scrapedItemLimitPerUser = limit;
+    });
+    await _refreshBackendStatuses();
   }
 
   Future<void> _reloadAll() async {
@@ -114,6 +153,57 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     _reloadLocal();
   }
 
+  Future<void> _rename(SavedKifFile entry) async {
+    if (kIsWeb) {
+      return;
+    }
+    var draftTitle = entry.title;
+    final nextTitle = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) {
+        return AlertDialog(
+          title: const Text('棋譜名を変更'),
+          content: TextFormField(
+            initialValue: entry.title,
+            autofocus: true,
+            decoration: const InputDecoration(hintText: '新しい名前'),
+            onChanged: (value) {
+              draftTitle = value;
+            },
+            onFieldSubmitted: (value) => Navigator.of(dialogContext).pop(value),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('キャンセル'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(dialogContext).pop(draftTitle),
+              child: const Text('変更する'),
+            ),
+          ],
+        );
+      },
+    );
+
+    if (!mounted || nextTitle == null) {
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await widget.storageService.renameSavedFile(entry.file, nextTitle);
+      _reloadLocal();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('棋譜名を変更しました')),
+      );
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('名前変更に失敗しました: $error')),
+      );
+    }
+  }
+
   Future<void> _deleteSource(RegisteredKifuSource entry) async {
     await widget.urlSourceStore.remove(entry.id);
     _reloadLocal();
@@ -128,9 +218,50 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     await widget.userStore.remove(entry.id);
     _latestJobs.remove(entry.username);
     _latestItems.remove(entry.username);
+    await widget.scrapedCatalog.removeByUsername(entry.username);
     _reloadLocal();
     if (mounted) {
       setState(() {});
+    }
+  }
+
+  Future<void> _syncTrackedUser(RegisteredShogiWarsUser entry) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await widget.backendService.registerTrackedUser(entry.username);
+      await widget.backendService.enqueueScrapeJob(entry.username);
+      await _refreshBackendStatuses();
+      if (!mounted) {
+        return;
+      }
+      messenger.showSnackBar(
+        SnackBar(content: Text('${entry.username} の同期を開始しました')),
+      );
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('同期開始に失敗しました: $error')),
+      );
+    }
+  }
+
+  Future<void> _saveScrapedItem(
+    ScrapedKifuRecord item,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final record = widget.storageService.parseRecordText(item.kifText);
+      final file = await widget.storageService.saveToLibrary(record);
+      _reloadLocal();
+      if (!mounted) {
+        return;
+      }
+      messenger.showSnackBar(
+        SnackBar(content: Text('保存しました: ${file.uri.pathSegments.last.replaceAll('.kif', '')}')),
+      );
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('保存に失敗しました: $error')),
+      );
     }
   }
 
@@ -464,7 +595,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
       }
       setState(() {
         _latestJobs = <String, BackendScrapeJobResponse>{};
-        _latestItems = <String, List<BackendKifuItemSummaryResponse>>{};
+        _latestItems = <String, List<ScrapedKifuRecord>>{};
         _isJobPolling = false;
       });
       _stopPolling();
@@ -472,7 +603,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
     }
 
     final nextJobs = <String, BackendScrapeJobResponse>{};
-    final nextItems = <String, List<BackendKifuItemSummaryResponse>>{};
+    final scrapedRecords = <ScrapedKifuRecord>[];
     for (final user in users) {
       try {
         final jobs = await widget.backendService.listScrapeJobs(user.username, limit: 1);
@@ -482,15 +613,28 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
         final latestJob = jobs.first;
         nextJobs[user.username] = latestJob;
         if (latestJob.status == 'succeeded' || latestJob.status == 'running') {
-          final items = await widget.backendService.listKifuItems(user.username, latestJob.id, limit: 5);
+          final items = await widget.backendService.listKifuItems(
+            user.username,
+            null,
+            limit: _scrapedItemLimitPerUser,
+          );
           if (items.isNotEmpty) {
-            nextItems[user.username] = items;
+            for (final item in items) {
+              final detail = await widget.backendService.getKifuItemDetail(user.username, item.id);
+              scrapedRecords.add(scrapedRecordFromBackendDetail(detail));
+            }
           }
         }
       } catch (_) {
         continue;
       }
     }
+
+    if (scrapedRecords.isNotEmpty) {
+      await widget.scrapedCatalog.upsertAll(scrapedRecords);
+    }
+
+    final nextItems = await _loadLocalScrapedItemsFor(users);
 
     if (!mounted) {
       return;
@@ -519,6 +663,31 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   void _stopPolling() {
     _pollingTimer?.cancel();
     _pollingTimer = null;
+  }
+
+  Future<void> _refreshLocalScrapedItems() async {
+    final users = await widget.userStore.load();
+    final nextItems = await _loadLocalScrapedItemsFor(users);
+    if (!mounted) {
+      return;
+    }
+    setState(() {
+      _latestItems = nextItems;
+    });
+  }
+
+  Future<Map<String, List<ScrapedKifuRecord>>> _loadLocalScrapedItemsFor(
+    List<RegisteredShogiWarsUser> users,
+  ) async {
+    final entries = await widget.scrapedCatalog.listByUsernames(
+      users.map((user) => user.username),
+      limitPerUser: _scrapedItemLimitPerUser,
+    );
+    final grouped = <String, List<ScrapedKifuRecord>>{};
+    for (final entry in entries) {
+      grouped.putIfAbsent(entry.username, () => <ScrapedKifuRecord>[]).add(entry);
+    }
+    return grouped;
   }
 
   @override
@@ -575,10 +744,11 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                       onPressed: _showUserRegistrationSheet,
                       icon: const Icon(Icons.person_add_alt_rounded),
                     ),
-                    IconButton(
-                      onPressed: _showBackendSettingsSheet,
-                      icon: const Icon(Icons.dns_rounded),
-                    ),
+                    if (kDebugMode)
+                      IconButton(
+                        onPressed: _showBackendSettingsSheet,
+                        icon: const Icon(Icons.dns_rounded),
+                      ),
                     IconButton(
                       onPressed: _isImporting ? null : _importFile,
                       icon: _isImporting
@@ -695,6 +865,40 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                                   Row(
                                     children: [
                                       const Expanded(child: _SectionTitle(label: '登録ユーザー')),
+                                      PopupMenuButton<int>(
+                                        tooltip: '表示件数',
+                                        initialValue: _scrapedItemLimitPerUser,
+                                        onSelected: (value) {
+                                          unawaited(_setScrapedItemLimit(value));
+                                        },
+                                        itemBuilder: (context) {
+                                          return ScrapedKifuViewSettingsStore.supportedLimits
+                                              .map(
+                                                (limit) => PopupMenuItem<int>(
+                                                  value: limit,
+                                                  child: Text('表示 $limit 件'),
+                                                ),
+                                              )
+                                              .toList(growable: false);
+                                        },
+                                        child: Padding(
+                                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                                          child: Row(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              Text(
+                                                '表示 $_scrapedItemLimitPerUser 件',
+                                                style: theme.textTheme.bodySmall?.copyWith(
+                                                  color: AppPalette.textSecondary,
+                                                  fontWeight: FontWeight.w700,
+                                                ),
+                                              ),
+                                              const SizedBox(width: 4),
+                                              const Icon(Icons.tune_rounded, size: 18, color: AppPalette.textSecondary),
+                                            ],
+                                          ),
+                                        ),
+                                      ),
                                       if (_isJobPolling) ...[
                                         const SizedBox(
                                           width: 16,
@@ -751,6 +955,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   }
 
   Widget _buildSavedFileTile(SavedKifFile entry) {
+    final theme = Theme.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Container(
@@ -759,22 +964,56 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
           borderRadius: BorderRadius.circular(18),
           border: Border.all(color: AppPalette.outline),
         ),
-        child: ListTile(
-          title: Text(
-            entry.title,
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.description_outlined, color: AppPalette.textSecondary),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      entry.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                _formatDate(entry.modifiedAt),
+                style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () async {
+                      await widget.onOpen(entry);
+                    },
+                    icon: const Icon(Icons.play_arrow_rounded),
+                    label: const Text('再現'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _rename(entry),
+                    icon: const Icon(Icons.edit_rounded),
+                    label: const Text('名前変更'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _delete(entry),
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('削除'),
+                  ),
+                ],
+              ),
+            ],
           ),
-          subtitle: Text(_formatDate(entry.modifiedAt)),
-          leading: const Icon(Icons.description_outlined),
-          trailing: IconButton(
-            onPressed: () => _delete(entry),
-            icon: const Icon(Icons.delete_outline_rounded),
-          ),
-          onTap: () {
-            widget.onOpen(entry);
-            Navigator.of(context).pop();
-          },
         ),
       ),
     );
@@ -811,7 +1050,7 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
   Widget _buildTrackedUserTile(RegisteredShogiWarsUser entry) {
     final theme = Theme.of(context);
     final latestJob = _latestJobs[entry.username];
-    final importedItems = _latestItems[entry.username] ?? const <BackendKifuItemSummaryResponse>[];
+    final importedItems = _latestItems[entry.username] ?? const <ScrapedKifuRecord>[];
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
@@ -862,6 +1101,23 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+              ),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => _syncTrackedUser(entry),
+                    icon: const Icon(Icons.sync_rounded),
+                    label: const Text('同期'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _deleteUser(entry),
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('削除'),
+                  ),
+                ],
               ),
               if (latestJob != null) ...[
                 const SizedBox(height: 10),
@@ -920,6 +1176,28 @@ class _SavedKifListSheetState extends State<SavedKifListSheet> {
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                             style: theme.textTheme.bodySmall?.copyWith(color: AppPalette.textSecondary),
+                          ),
+                          const SizedBox(height: 6),
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Wrap(
+                              spacing: 8,
+                              runSpacing: 8,
+                              children: [
+                                OutlinedButton.icon(
+                                  onPressed: () async {
+                                    await widget.onOpenScraped(item);
+                                  },
+                                  icon: const Icon(Icons.play_circle_outline_rounded),
+                                  label: const Text('再現'),
+                                ),
+                                OutlinedButton.icon(
+                                  onPressed: () => _saveScrapedItem(item),
+                                  icon: const Icon(Icons.save_alt_rounded),
+                                  label: const Text('保存'),
+                                ),
+                              ],
+                            ),
                           ),
                         ],
                       ),

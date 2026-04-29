@@ -245,4 +245,20 @@ void main() {
     expect(state.moveRecords, hasLength(1));
     expect(state.statusMessage, '後手の手番です');
   });
+
+  test('resigning current player awards win to the opponent and shows game end popup', () {
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    final controller = container.read(gameSessionProvider.notifier);
+    controller.resetSession();
+
+    controller.resignCurrentPlayer();
+
+    final state = container.read(gameSessionProvider);
+    expect(state.winner, ShogiPlayer.gote);
+    expect(state.winReason, '投了');
+    expect(state.showGameEndPopup, isTrue);
+    expect(state.statusMessage, '先手が投了。後手の勝ちです');
+  });
 }

@@ -5,12 +5,14 @@ import '../../app/providers.dart';
 import '../../domain/models/shogi_models.dart';
 import '../../services/kifu_storage_service.dart';
 import '../../services/kifu_parser.dart';
+import '../../services/scraped_kifu_catalog.dart';
 import '../../services/shogi_extend_backend_service.dart';
 import '../../services/shogi_wars_user_store.dart';
 import '../../services/url_source_store.dart';
 import '../../shared/theme/app_palette.dart';
 import '../game/presentation/game_page.dart';
 import '../game/presentation/game_setup_sheet.dart';
+import '../timer/presentation/timer_page.dart';
 import 'saved_kif_list_sheet.dart';
 import 'url_registration_sheet.dart';
 
@@ -21,6 +23,7 @@ class HomePage extends ConsumerWidget {
   static final URLSourceStore _urlSourceStore = URLSourceStore();
   static final ShogiWarsUserStore _shogiWarsUserStore = ShogiWarsUserStore();
   static final ShogiExtendBackendService _backendService = ShogiExtendBackendService();
+  static final ScrapedKifuCatalog _scrapedCatalog = createDefaultScrapedKifuCatalog();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -84,10 +87,10 @@ class HomePage extends ConsumerWidget {
                               _StartActionButton(
                                 icon: Icons.timer_outlined,
                                 label: 'タイマー',
-                                onPressed: () => _showPendingSheet(
-                                  context,
-                                  title: 'タイマー',
-                                  message: '独立タイマー画面と設定シートは未実装です。',
+                                onPressed: () => Navigator.of(context).push(
+                                  MaterialPageRoute<void>(
+                                    builder: (_) => const TimerPage(),
+                                  ),
                                 ),
                               ),
                             ],
@@ -149,44 +152,14 @@ class HomePage extends ConsumerWidget {
     );
   }
 
-  Future<void> _showPendingSheet(
-    BuildContext context, {
-    required String title,
-    required String message,
-  }) {
-    return showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      backgroundColor: const Color(0xFFFFF7EA),
-      builder: (context) {
-        final theme = Theme.of(context);
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 8, 20, 28),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(title, style: theme.textTheme.titleLarge),
-              const SizedBox(height: 10),
-              Text(message, style: theme.textTheme.bodyLarge),
-              const SizedBox(height: 18),
-              FilledButton(
-                onPressed: () => Navigator.of(context).pop(),
-                child: const Text('閉じる'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
   Future<void> _showSavedKifSheet(BuildContext context, WidgetRef ref) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final navigator = Navigator.of(context);
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (context) {
+      builder: (_) {
         return FractionallySizedBox(
           heightFactor: 0.84,
           child: SavedKifListSheet(
@@ -194,18 +167,20 @@ class HomePage extends ConsumerWidget {
             urlSourceStore: _urlSourceStore,
             userStore: _shogiWarsUserStore,
             backendService: _backendService,
+            scrapedCatalog: _scrapedCatalog,
             onOpen: (entry) async {
-              final messenger = ScaffoldMessenger.of(context);
               try {
                 final record = await _kifuStorageService.loadRecord(entry.file);
                 ref.read(gameSessionProvider.notifier).openPersistedRecordForReview(record);
-                if (context.mounted) {
-                  await Navigator.of(context).push(
-                    MaterialPageRoute<void>(
-                      builder: (_) => const GamePage(),
-                    ),
-                  );
+                if (!context.mounted) {
+                  return;
                 }
+                navigator.pop();
+                await navigator.push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const GamePage(),
+                  ),
+                );
               } on KifuParseException catch (error) {
                 messenger.showSnackBar(
                   SnackBar(content: Text('棋譜の読込に失敗しました: ${error.message}')),
@@ -213,6 +188,29 @@ class HomePage extends ConsumerWidget {
               } catch (error) {
                 messenger.showSnackBar(
                   SnackBar(content: Text('棋譜の読込に失敗しました: $error')),
+                );
+              }
+            },
+            onOpenScraped: (item) async {
+              try {
+                final record = _kifuStorageService.parseRecordText(item.kifText);
+                ref.read(gameSessionProvider.notifier).openPersistedRecordForReview(record);
+                if (!context.mounted) {
+                  return;
+                }
+                navigator.pop();
+                await navigator.push(
+                  MaterialPageRoute<void>(
+                    builder: (_) => const GamePage(),
+                  ),
+                );
+              } on KifuParseException catch (error) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('棋譜の再現に失敗しました: ${error.message}')),
+                );
+              } catch (error) {
+                messenger.showSnackBar(
+                  SnackBar(content: Text('棋譜の再現に失敗しました: $error')),
                 );
               }
             },

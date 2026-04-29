@@ -61,3 +61,4 @@ uvicorn app.main:app --reload --app-dir backend
 - `kif_text` は RU 削減のため index から除外しています。
 - KIF 取得は確認済みの内部エンドポイント `/w/{battle_key}.kif` を第一優先で使い、補助メタデータは `/w/{battle_key}.json` から取得します。
 - 対局詳細ページの HTML 解析はフォールバックとして残しています。
+- 現在の Flutter frontend は local-first persistence を採用しており、この backend は scraped result の実行・取得 source として使われます。frontend 側の永続化所有権は `ScrapedKifuCatalog` にあります。

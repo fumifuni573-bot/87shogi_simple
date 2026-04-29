@@ -30,6 +30,9 @@ class ScrapeRepository(Protocol):
     def list_kifu_items(self, username: str, job_id: str | None = None, limit: int = 20) -> list[KifuItem]:
         ...
 
+    def get_kifu_item(self, username: str, item_id: str) -> KifuItem | None:
+        ...
+
     def has_kifu_item(self, username: str, source_game_id: str, content_hash: str | None = None) -> bool:
         ...
 

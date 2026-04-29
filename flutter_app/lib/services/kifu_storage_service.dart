@@ -70,12 +70,16 @@ class KifuStorageService {
   }
 
   Future<File> importText(String text) async {
-    final record = KifuParser.parse(text: text, includeHistory: true).record;
+    final record = parseRecordText(text);
     return saveToLibrary(record);
   }
 
   Future<PersistedShogiGameRecord> loadRecord(File file) async {
     final text = await file.readAsString();
+    return parseRecordText(text);
+  }
+
+  PersistedShogiGameRecord parseRecordText(String text) {
     return KifuParser.parse(text: text, includeHistory: true).record;
   }
 
@@ -83,6 +87,32 @@ class KifuStorageService {
     if (await file.exists()) {
       await file.delete();
     }
+  }
+
+  Future<File> renameSavedFile(File file, String rawTitle) async {
+    final normalizedTitle = normalizeTitle(rawTitle);
+    if (normalizedTitle == null) {
+      throw ArgumentError('名前が空です');
+    }
+    final currentExtension = file.path.toLowerCase().endsWith('.kif') ? '.kif' : '';
+    final targetPath = '${file.parent.path}${Platform.pathSeparator}$normalizedTitle$currentExtension';
+    if (file.path == targetPath) {
+      return file;
+    }
+    final targetFile = File(targetPath);
+    if (await targetFile.exists()) {
+      throw ArgumentError('同名の棋譜が既にあります');
+    }
+    return file.rename(targetPath);
+  }
+
+  String? normalizeTitle(String rawTitle) {
+    final trimmed = rawTitle.trim().replaceAll(RegExp(r'\.kif$', caseSensitive: false), '');
+    if (trimmed.isEmpty) {
+      return null;
+    }
+    final sanitized = trimmed.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
+    return sanitized.isEmpty ? null : sanitized;
   }
 
   Future<File> exportAndShare(PersistedShogiGameRecord record) async {

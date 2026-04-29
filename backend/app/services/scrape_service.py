@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from app.config import Settings
-from app.models import JobStatus, KifuItem, KifuItemSummary, ScrapeJob, ScrapeJobCreate, ScrapeMode, TrackedSource, TrackedSourceCreate, utc_now
+from app.models import JobStatus, KifuItem, KifuItemDetail, KifuItemSummary, ScrapeJob, ScrapeJobCreate, ScrapeMode, TrackedSource, TrackedSourceCreate, utc_now
 from app.repositories.base import ScrapeRepository
 from app.services.shogi_extend_client import ShogiExtendClient
 
@@ -53,6 +53,12 @@ class ScrapeService:
     def list_kifu_items(self, username: str, job_id: str | None = None, limit: int = 20) -> list[KifuItemSummary]:
         items = self._repository.list_kifu_items(username=username, job_id=job_id, limit=limit)
         return [KifuItemSummary.from_item(item) for item in items]
+
+    def get_kifu_item(self, username: str, item_id: str) -> KifuItemDetail | None:
+        item = self._repository.get_kifu_item(username=username, item_id=item_id)
+        if item is None:
+            return None
+        return KifuItemDetail.from_item(item)
 
     async def run_job(self, job_id: str) -> ScrapeJob:
         job = self._repository.get_job(job_id)
